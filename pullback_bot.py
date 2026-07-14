@@ -54,7 +54,7 @@ if not OKX_API_KEY or not OKX_SECRET_KEY or not OKX_PASSPHRASE:
 # Danh sách sản phẩm Hợp đồng Vĩnh cửu (Perpetual Swap) ký quỹ bằng USDT
 SYMBOLS = ["TRX-USDT-SWAP", "XRP-USDT-SWAP", "LTC-USDT-SWAP", "SHIB-USDT-SWAP", "DOGE-USDT-SWAP", "ARB-USDT-SWAP", "SOL-USDT-SWAP"]
 INTERVAL = "15m"                            # Khung thời gian quét chính
-PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "okx_paper_pullback_portfolio.json")
+PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "okx_pullback_portfolio.json")
 
 # Quản lý rủi ro giả lập
 RISK_PERCENT = 2.0                          # Rủi ro 2% tài khoản mỗi lệnh
@@ -474,11 +474,11 @@ if __name__ == "__main__":
     # Vòng lặp chính quét tín hiệu mỗi 30 giây
     while True:
         try:
-            logger.info("🔍 Bắt đầu chu kỳ quét tín hiệu Pullback...")
+            logger.debug("🔍 Bắt đầu chu kỳ quét tín hiệu Pullback...")
             for symbol in SYMBOLS:
                 check_signals_for_symbol(symbol)
                 time.sleep(1) # Tránh rate limit của sàn
-            logger.info("⏳ Chu kỳ quét hoàn thành. Chờ 30 giây...")
+            logger.debug("⏳ Chu kỳ quét hoàn thành. Chờ 30 giây...")
             time.sleep(30)
         except KeyboardInterrupt:
             logger.info("⏹️ Đang tắt bot...")
