@@ -71,6 +71,17 @@ exchange = ccxt.okx({
 })
 exchange.set_sandbox_mode(False) 
 
+def format_price(symbol, price):
+    try:
+        market = exchange.market(symbol)
+        precision = market['precision']['price']
+        if isinstance(precision, int):
+            return f"{price:.{precision}f}"
+        else:
+            return f"{price:.8f}".rstrip('0').rstrip('.')
+    except Exception:
+        return f"{price:.6f}"
+
 # ==========================================================
 # KHỞI TẠO VÀ QUẢN LÝ DANH MỤC GIẢ LẬP (PORTFOLIO)
 # ==========================================================
@@ -251,9 +262,9 @@ def open_simulated_position(symbol: str, order_type: str, entry: float, sl: floa
     msg = (
         f"{emoji} <b>[MÔ PHỎNG PULLBACK - MỞ LỆNH] {order_type} {symbol} ({INTERVAL})</b>\n\n"
         f"🎟️ <b>Khối lượng:</b> {contracts} Hợp đồng\n"
-        f"👉 <b>Giá vào lệnh:</b> {entry:.4f}\n"
-        f"🛡️ <b>Stop Loss (0.8%):</b> {sl:.4f} (Rủi ro: -{risk_amount:.2f} USDT)\n"
-        f"🎯 <b>Take Profit (1.2%):</b> {tp:.4f} (Lợi nhuận mục tiêu: +{profit_amount:.2f} USDT)\n\n"
+        f"👉 <b>Giá vào lệnh:</b> {format_price(symbol, entry)}\n"
+        f"🛡️ <b>Stop Loss (0.8%):</b> {format_price(symbol, sl)} (Rủi ro: -{risk_amount:.2f} USDT)\n"
+        f"🎯 <b>Take Profit (1.2%):</b> {format_price(symbol, tp)} (Lợi nhuận mục tiêu: +{profit_amount:.2f} USDT)\n\n"
         f"📊 <b>Số dư tài khoản mô phỏng:</b> {portfolio['balance']:.2f} USDT"
     )
     send_telegram_message(msg)
@@ -283,7 +294,7 @@ def close_simulated_trade(symbol: str, order_type: str, entry: float, exit_price
         f"{emoji} <b>[MÔ PHỎNG PULLBACK - ĐÓNG LỆNH] {symbol} ({action_str})</b>\n\n"
         f"🎟️ <b>Loại vị thế:</b> {order_type}\n"
         f"💵 <b>Khối lượng:</b> {contracts} Hợp đồng\n"
-        f"👉 <b>Entry:</b> {entry:.4f} | <b>Exit:</b> {exit_price:.4f}\n"
+        f"👉 <b>Entry:</b> {format_price(symbol, entry)} | <b>Exit:</b> {format_price(symbol, exit_price)}\n"
         f"💰 <b>Kết quả:</b> {'-' if profit < 0 else '+'}{abs(profit):.2f} USDT\n"
         f"📊 <b>Số dư tài khoản mô phỏng:</b> <b>{portfolio['balance']:.2f} USDT</b>"
     )
