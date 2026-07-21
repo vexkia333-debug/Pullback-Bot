@@ -52,7 +52,11 @@ if not OKX_API_KEY or not OKX_SECRET_KEY or not OKX_PASSPHRASE:
     sys.exit(1)
 
 # Danh sách sản phẩm Hợp đồng Vĩnh cửu (Perpetual Swap) ký quỹ bằng USDT
-SYMBOLS = ["TRX-USDT-SWAP", "XRP-USDT-SWAP", "LTC-USDT-SWAP", "SHIB-USDT-SWAP", "DOGE-USDT-SWAP", "ARB-USDT-SWAP", "SOL-USDT-SWAP"]
+SYMBOLS = [
+    "TRX-USDT-SWAP", "XRP-USDT-SWAP", "LTC-USDT-SWAP", "SHIB-USDT-SWAP", 
+    "DOGE-USDT-SWAP", "ARB-USDT-SWAP", "SOL-USDT-SWAP", "ADA-USDT-SWAP", 
+    "DOT-USDT-SWAP", "AVAX-USDT-SWAP", "NEAR-USDT-SWAP", "LINK-USDT-SWAP"
+]
 INTERVAL = "15m"                            # Khung thời gian quét chính
 PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "okx_pullback_portfolio.json")
 
