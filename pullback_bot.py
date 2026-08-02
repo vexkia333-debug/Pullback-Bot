@@ -42,7 +42,6 @@ OKX_API_KEY = os.environ.get("OKX_API_KEY")
 OKX_SECRET_KEY = os.environ.get("OKX_SECRET_KEY")
 OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE")
 
-# Kiểm tra cấu hình bắt buộc
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     logger.error("🔴 Lỗi: Chưa cấu hình TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong tệp .env!")
     sys.exit(1)
@@ -51,22 +50,17 @@ if not OKX_API_KEY or not OKX_SECRET_KEY or not OKX_PASSPHRASE:
     logger.error("🔴 Lỗi: Chưa cấu hình đầy đủ OKX_API_KEY, OKX_SECRET_KEY hoặc OKX_PASSPHRASE!")
     sys.exit(1)
 
-# Danh sách sản phẩm Hợp đồng Vĩnh cửu (Perpetual Swap) ký quỹ bằng USDT
 SYMBOLS = [
-    "TRX-USDT-SWAP", "XRP-USDT-SWAP", "LTC-USDT-SWAP", "SHIB-USDT-SWAP", 
-    "DOGE-USDT-SWAP", "ARB-USDT-SWAP", "SOL-USDT-SWAP", "ADA-USDT-SWAP", 
-    "DOT-USDT-SWAP", "AVAX-USDT-SWAP", "NEAR-USDT-SWAP", "LINK-USDT-SWAP"
+    "ETH-USDT-SWAP", "LINK-USDT-SWAP", "TRX-USDT-SWAP", "XRP-USDT-SWAP", 
+    "AVAX-USDT-SWAP", "SOL-USDT-SWAP", "DOGE-USDT-SWAP", "ARB-USDT-SWAP"
 ]
-INTERVAL = "15m"                            # Khung thời gian quét chính
+INTERVAL = "15m"
 PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "okx_pullback_portfolio.json")
 
-# Quản lý rủi ro giả lập
-RISK_PERCENT = 2.0                          # Rủi ro 2% tài khoản mỗi lệnh
+RISK_PERCENT = 3.0                          # Rủi ro 3% tài khoản mỗi lệnh
 INITIAL_BALANCE = 100.0                     # Vốn giả lập ban đầu 100 USDT
-SL_PCT = 0.008                              # Cắt lỗ cứng 0.8%
-TP_PCT = 0.012                              # Chốt lời cứng 1.2% (R:R = 1.5)
+TAKER_FEE_RATE = 0.0005                     # Phí sàn Taker 0.05% mỗi chiều
 
-# Khởi tạo API sàn OKX ở chế độ THẬT (Nhưng chỉ dùng để ĐỌC dữ liệu)
 exchange = ccxt.okx({
     'apiKey': OKX_API_KEY,
     'secret': OKX_SECRET_KEY,
@@ -86,18 +80,14 @@ def format_price(symbol, price):
     except Exception:
         return f"{price:.6f}"
 
-# ==========================================================
-# KHỞI TẠO VÀ QUẢN LÝ DANH MỤC GIẢ LẬP (PORTFOLIO)
-# ==========================================================
 portfolio = {}
 
 def save_portfolio():
     try:
-        # Tạo thư mục data nếu chưa có
         os.makedirs(os.path.dirname(PORTFOLIO_FILE), exist_ok=True)
         with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
             json.dump(portfolio, f, indent=4, ensure_ascii=False)
-        logger.debug("💾 Đã cập nhật danh mục giả lập Pullback.")
+        logger.debug("💾 Đã cập nhật danh mục giả lập Pullback V6.")
     except Exception as e:
         logger.error(f"🔴 Lỗi ghi file portfolio JSON: {e}")
 
@@ -105,6 +95,7 @@ def init_new_portfolio():
     global portfolio
     portfolio = {
         "balance": INITIAL_BALANCE,
+        "total_fees_paid": 0.0,
         "positions": {},
         "last_signal_times": {},
         "trades_history": []
@@ -113,7 +104,7 @@ def init_new_portfolio():
         portfolio["positions"][sym] = None
         portfolio["last_signal_times"][sym] = 0
     save_portfolio()
-    logger.info(f"✨ Khởi tạo danh mục giả lập Pullback mới với số dư: {INITIAL_BALANCE} USDT")
+    logger.info(f"✨ Khởi tạo danh mục giả lập Pullback V6 mới với số dư: {INITIAL_BALANCE} USDT")
 
 def load_portfolio():
     global portfolio
@@ -121,7 +112,8 @@ def load_portfolio():
         try:
             with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
                 portfolio = json.load(f)
-            # Đồng bộ các symbol nếu danh sách đổi
+            if "total_fees_paid" not in portfolio:
+                portfolio["total_fees_paid"] = 0.0
             if "last_signal_times" not in portfolio:
                 portfolio["last_signal_times"] = {}
             for sym in SYMBOLS:
@@ -129,7 +121,7 @@ def load_portfolio():
                     portfolio["positions"][sym] = None
                 if sym not in portfolio["last_signal_times"]:
                     portfolio["last_signal_times"][sym] = 0
-            logger.info(f"💾 Đã nạp danh mục giả lập Pullback. Số dư hiện tại: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT")
+            logger.info(f"💾 Đã nạp danh mục giả lập Pullback V6. Số dư hiện tại: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT")
         except Exception as e:
             logger.error(f"🔴 Lỗi đọc file portfolio JSON: {e}")
             init_new_portfolio()
@@ -159,7 +151,7 @@ def send_telegram_message(text):
     return None
 
 # ==========================================================
-# PHÂN TÍCH KỸ THUẬT (INDICATORS)
+# INDICATORS
 # ==========================================================
 def calculate_ema(prices: list, length: int) -> list:
     ema = [0.0] * len(prices)
@@ -171,124 +163,127 @@ def calculate_ema(prices: list, length: int) -> list:
         ema[i] = prices[i] * alpha + ema[i - 1] * (1 - alpha)
     return ema
 
-def calculate_rsi(prices: list, length: int = 14) -> list:
-    n = len(prices)
-    rsi = [50.0] * n
-    if n <= length: return rsi
-    deltas = [prices[i] - prices[i-1] for i in range(1, n)]
-    gains = [d if d > 0 else 0.0 for d in deltas]
-    losses = [-d if d < 0 else 0.0 for d in deltas]
-    
-    avg_gain = sum(gains[:length]) / length
-    avg_loss = sum(losses[:length]) / length
-    
-    if avg_loss > 0:
-        rs = avg_gain / avg_loss
-        rsi[length] = 100.0 - (100.0 / (1.0 + rs))
-    else:
-        rsi[length] = 100.0
-        
+def calculate_atr(candles: list, length: int = 14) -> list:
+    n = len(candles)
+    atr = [0.0] * n
+    if n <= length: return atr
+    tr = [0.0] * n
+    for i in range(1, n):
+        h, l, pc = candles[i]["high"], candles[i]["low"], candles[i-1]["close"]
+        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
+    atr[length] = sum(tr[1:length+1]) / length
     for i in range(length + 1, n):
-        gain = gains[i-1]
-        loss = losses[i-1]
-        avg_gain = (avg_gain * (length - 1) + gain) / length
-        avg_loss = (avg_loss * (length - 1) + loss) / length
-        if avg_loss > 0:
-            rs = avg_gain / avg_loss
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+        atr[i] = (atr[i-1] * (length - 1) + tr[i]) / length
+    return atr
+
+def calculate_supertrend(candles: list, period: int = 10, multiplier: float = 2.5):
+    n = len(candles)
+    atr = calculate_atr(candles, period)
+    hl2 = [(c["high"] + c["low"]) / 2 for c in candles]
+    basic_upper, basic_lower = [0.0]*n, [0.0]*n
+    final_upper, final_lower = [0.0]*n, [0.0]*n
+    st = [0.0] * n
+    direction = [1] * n
+    for i in range(period, n):
+        basic_upper[i] = hl2[i] + multiplier * atr[i]
+        basic_lower[i] = hl2[i] - multiplier * atr[i]
+        if i == period:
+            final_upper[i] = basic_upper[i]
+            final_lower[i] = basic_lower[i]
         else:
-            rsi[i] = 100.0
-    return rsi
+            final_upper[i] = basic_upper[i] if basic_upper[i] < final_upper[i-1] or candles[i-1]["close"] > final_upper[i-1] else final_upper[i-1]
+            final_lower[i] = basic_lower[i] if basic_lower[i] > final_lower[i-1] or candles[i-1]["close"] < final_lower[i-1] else final_lower[i-1]
+        direction[i] = 1 if candles[i]["close"] > final_upper[i-1] else (-1 if candles[i]["close"] < final_lower[i-1] else direction[i-1])
+        st[i] = final_upper[i] if direction[i] == -1 else final_lower[i]
+    return st, direction
 
-def calculate_bb(prices: list, n: int = 20, std_mult: float = 2.0) -> tuple:
-    l = len(prices)
-    basis = [0.0]*l
-    upper = [0.0]*l
-    lower = [0.0]*l
-    if l < n: return basis, upper, lower
-    
-    for i in range(n-1, l):
-        window = prices[i-n+1:i+1]
-        basis[i] = sum(window)/n
-        dev = math.sqrt(sum((x - basis[i])**2 for x in window)/n)
-        upper[i] = basis[i] + std_mult * dev
-        lower[i] = basis[i] - std_mult * dev
-    return basis, upper, lower
+def calculate_vol_ma(volumes: list, length: int = 20) -> list:
+    ma = [0.0] * len(volumes)
+    if len(volumes) < length: return ma
+    for i in range(length - 1, len(volumes)):
+        ma[i] = sum(volumes[i - length + 1 : i + 1]) / length
+    return ma
 
 # ==========================================================
-# THAO TÁC GIAO DỊCH GIẢ LẬP
+# TRADING OPERATIONS WITH REAL EXCHANGE FEE DEDUCTION
 # ==========================================================
-def calculate_contracts(symbol: str, price: float) -> int:
-    """Tính toán số hợp đồng dựa trên rủi ro 2% tài khoản với Stop Loss cố định 0.8%"""
+def calculate_contracts(symbol: str, entry: float, sl: float) -> int:
     try:
         balance = portfolio.get("balance", INITIAL_BALANCE)
         risk_amount = balance * (RISK_PERCENT / 100.0)
-        
         market = exchange.market(symbol)
         contract_size = market['contractSize']
-        
-        # SL cố định cách Entry 0.8% -> Khoảng cách giá SL là price * 0.008
-        sl_distance = price * SL_PCT
-        
-        # Formula: Contracts = Risk_Amount / (SL_Distance * Contract_Size)
+        sl_distance = abs(entry - sl)
+        if sl_distance == 0: return 1
         contracts = risk_amount / (sl_distance * contract_size)
-        
-        # Áp dụng độ chính xác của sàn
         lot_size = market.get('lotSize', 1.0)
-        precision = 0
         if lot_size < 1:
             precision = int(-math.log10(lot_size))
             contracts = round(contracts, precision)
         else:
             contracts = int(contracts - (contracts % lot_size))
-            
         return max(1, contracts)
     except Exception as e:
-        logger.error(f"🔴 Lỗi tính toán khối lượng hợp đồng cho {symbol}: {e}")
+        logger.error(f"🔴 Lỗi tính số hợp đồng cho {symbol}: {e}")
         return 1
 
-def open_simulated_position(symbol: str, order_type: str, entry: float, sl: float, tp: float, contracts: int):
-    """Mở vị thế mô phỏng mới"""
-    portfolio["positions"][symbol] = {
-        "type": order_type,
-        "entry_price": entry,
-        "sl": sl,
-        "tp": tp,
-        "contracts": contracts,
-        "entry_time": int(time.time() * 1000) # Lưu dạng ms để đồng bộ
-    }
-    save_portfolio()
-    
-    emoji = "🟢" if order_type == "LONG" else "🔴"
+def open_simulated_position(symbol: str, order_type: str, entry: float, sl: float, tp1: float, tp2: float, contracts: int):
     try:
         market = exchange.market(symbol)
         contract_size = market['contractSize']
     except Exception:
         contract_size = 0.01
-        
+
+    entry_val = entry * contracts * contract_size
+    entry_fee = entry_val * TAKER_FEE_RATE
+    
+    # Trừ phí mở lệnh ngay vào tài khoản
+    portfolio["balance"] -= entry_fee
+    portfolio["total_fees_paid"] += entry_fee
+
+    portfolio["positions"][symbol] = {
+        "type": order_type,
+        "entry_price": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "contracts": contracts,
+        "remaining_contracts": contracts,
+        "entry_val": entry_val,
+        "entry_fee": entry_fee,
+        "is_tp1_hit": False,
+        "entry_time": int(time.time() * 1000)
+    }
+    save_portfolio()
+    
+    emoji = "🟢" if order_type == "LONG" else "🔴"
     risk_amount = abs(entry - sl) * contracts * contract_size
-    profit_amount = abs(tp - entry) * contracts * contract_size
+    sl_dist_pct = (abs(entry - sl) / entry) * 100.0
     
     msg = (
-        f"{emoji} <b>[MÔ PHỎNG PULLBACK - MỞ LỆNH] {order_type} {symbol} ({INTERVAL})</b>\n\n"
+        f"{emoji} <b>[PULLBACK A - MỞ LỆNH] {order_type} {symbol} ({INTERVAL})</b>\n\n"
         f"🎟️ <b>Khối lượng:</b> {contracts} Hợp đồng\n"
         f"👉 <b>Giá vào lệnh:</b> {format_price(symbol, entry)}\n"
-        f"🛡️ <b>Stop Loss (0.8%):</b> {format_price(symbol, sl)} (Rủi ro: -{risk_amount:.2f} USDT)\n"
-        f"🎯 <b>Take Profit (1.2%):</b> {format_price(symbol, tp)} (Lợi nhuận mục tiêu: +{profit_amount:.2f} USDT)\n\n"
-        f"📊 <b>Số dư tài khoản mô phỏng:</b> {portfolio['balance']:.2f} USDT"
+        f"🛡️ <b>Stop Loss ({sl_dist_pct:.2f}%):</b> {format_price(symbol, sl)} (Rủi ro: -{risk_amount:.2f} USDT)\n"
+        f"🎯 <b>TP1 (1.5R):</b> {format_price(symbol, tp1)} | <b>TP2 (3.0R):</b> {format_price(symbol, tp2)}\n"
+        f"💸 <b>Phí mở lệnh OKX (0.05% Taker):</b> -{entry_fee:.4f} USDT\n\n"
+        f"📊 <b>Số dư sau trừ phí:</b> <b>{portfolio['balance']:.2f} USDT</b>"
     )
     send_telegram_message(msg)
 
-def close_simulated_trade(symbol: str, order_type: str, entry: float, exit_price: float, contracts: int, profit: float, reason: str):
-    """Xử lý kết thúc vị thế mô phỏng, ghi chép nhật ký giao dịch và báo Telegram"""
+def close_simulated_trade(symbol: str, order_type: str, entry: float, exit_price: float, contracts: int, gross_pnl: float, exit_fee: float, reason: str):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    net_pnl = gross_pnl - exit_fee
+    
     trade_record = {
         "symbol": symbol,
         "type": order_type,
         "entry_price": entry,
         "exit_price": exit_price,
         "contracts": contracts,
-        "profit": round(profit, 2),
+        "gross_pnl": round(gross_pnl, 4),
+        "exit_fee": round(exit_fee, 4),
+        "net_pnl": round(net_pnl, 4),
         "reason": reason,
         "time": now_str
     }
@@ -297,24 +292,24 @@ def close_simulated_trade(symbol: str, order_type: str, entry: float, exit_price
     portfolio["positions"][symbol] = None
     save_portfolio()
     
-    emoji = "🔴" if profit < 0 else "🟢"
-    action_str = "DỪNG LỖ (SL)" if reason == "STOP_LOSS" else "CHỐT LỜI (TP)"
+    emoji = "🔴" if net_pnl < 0 else "🟢"
+    action_str = "DỪNG LỖ (SL)" if "SL" in reason else ("TP1 & DỜI SL" if reason == "TP1_HIT" else "CHỐT LỜI ĐỦ (TP2)")
     
     msg = (
-        f"{emoji} <b>[MÔ PHỎNG PULLBACK - ĐÓNG LỆNH] {symbol} ({action_str})</b>\n\n"
-        f"🎟️ <b>Loại vị thế:</b> {order_type}\n"
-        f"💵 <b>Khối lượng:</b> {contracts} Hợp đồng\n"
+        f"{emoji} <b>[PULLBACK A - ĐÓNG LỆNH] {symbol} ({action_str})</b>\n\n"
+        f"🎟️ <b>Loại vị thế:</b> {order_type} ({contracts} contracts)\n"
         f"👉 <b>Entry:</b> {format_price(symbol, entry)} | <b>Exit:</b> {format_price(symbol, exit_price)}\n"
-        f"💰 <b>Kết quả:</b> {'-' if profit < 0 else '+'}{abs(profit):.2f} USDT\n"
-        f"📊 <b>Số dư tài khoản mô phỏng:</b> <b>{portfolio['balance']:.2f} USDT</b>"
+        f"💵 <b>Lợi nhuận gộp:</b> {gross_pnl:+.4f} USDT\n"
+        f"💸 <b>Phí đóng lệnh OKX (0.05%):</b> -{exit_fee:.4f} USDT\n"
+        f"💰 <b>LỢI NHUẬN RÒNG THỰC TẾ:</b> <b>{net_pnl:+.4f} USDT</b>\n\n"
+        f"📊 <b>Số dư tài khoản:</b> <b>{portfolio['balance']:.2f} USDT</b>\n"
+        f"💸 <b>Tổng phí sàn tích lũy:</b> {portfolio['total_fees_paid']:.4f} USDT"
     )
     send_telegram_message(msg)
 
 def check_active_positions(symbol: str, current_candle: dict):
-    """Kiểm tra giá hiện tại để quét dừng lỗ / chốt lời của vị thế đang mở"""
     pos = portfolio["positions"].get(symbol)
-    if pos is None:
-        return
+    if pos is None: return
         
     high = current_candle["high"]
     low = current_candle["low"]
@@ -324,46 +319,119 @@ def check_active_positions(symbol: str, current_candle: dict):
         contract_size = market['contractSize']
     except Exception:
         contract_size = 0.01
-        
-    # --- TRƯỜNG HỢP VỊ THẾ LONG ---
+
+    contracts = pos["remaining_contracts"]
+    
+    # LONG POSITION
     if pos["type"] == "LONG":
-        # 1. Kiểm tra dừng lỗ (Stop Loss)
-        if low <= pos["sl"]:
-            loss = (pos["sl"] - pos["entry_price"]) * pos["contracts"] * contract_size
-            portfolio["balance"] += loss
-            close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["sl"], pos["contracts"], loss, "STOP_LOSS")
-            return
+        if not pos["is_tp1_hit"] and high >= pos["tp1"]:
+            # Khớp TP1: Chốt 50% khối lượng, dời SL về Entry
+            tp1_contracts = max(1, contracts // 2)
+            pos["remaining_contracts"] -= tp1_contracts
+            pos["is_tp1_hit"] = True
+            pos["sl"] = pos["entry_price"]
             
-        # 2. Kiểm tra chốt lời (Take Profit)
-        if high >= pos["tp"]:
-            profit = (pos["tp"] - pos["entry_price"]) * pos["contracts"] * contract_size
-            portfolio["balance"] += profit
-            close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["tp"], pos["contracts"], profit, "TAKE_PROFIT")
-            return
+            exit_val = pos["tp1"] * tp1_contracts * contract_size
+            exit_fee = exit_val * TAKER_FEE_RATE
+            gross_pnl = (pos["tp1"] - pos["entry_price"]) * tp1_contracts * contract_size
+            net_pnl = gross_pnl - exit_fee
+            
+            portfolio["balance"] += net_pnl
+            portfolio["total_fees_paid"] += exit_fee
+            save_portfolio()
+            
+            send_telegram_message(
+                f"🎯 <b>[PULLBACK A - KHỚP TP1 50%] {symbol}</b>\n\n"
+                f"👉 <b>Khớp TP1 giá:</b> {format_price(symbol, pos['tp1'])}\n"
+                f"💰 <b>Lãi ròng TP1:</b> +{net_pnl:.4f} USDT (Đã trừ phí sàn -{exit_fee:.4f} USDT)\n"
+                f"🛡️ <b>ĐÃ TỰ ĐỘNG DỜI STOP LOSS VỀ ENTRY:</b> {format_price(symbol, pos['entry_price'])}\n"
+                f"📊 <b>Số dư tài khoản:</b> {portfolio['balance']:.2f} USDT"
+            )
+            
+        if pos["is_tp1_hit"]:
+            if low <= pos["sl"]:
+                # Thoát phần còn lại tại BE
+                rem = pos["remaining_contracts"]
+                exit_val = pos["sl"] * rem * contract_size
+                exit_fee = exit_val * TAKER_FEE_RATE
+                gross_pnl = (pos["sl"] - pos["entry_price"]) * rem * contract_size
+                portfolio["balance"] += (gross_pnl - exit_fee)
+                portfolio["total_fees_paid"] += exit_fee
+                close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["sl"], rem, gross_pnl, exit_fee, "SL_BE")
+            elif high >= pos["tp2"]:
+                # Khớp TP2 phần còn lại
+                rem = pos["remaining_contracts"]
+                exit_val = pos["tp2"] * rem * contract_size
+                exit_fee = exit_val * TAKER_FEE_RATE
+                gross_pnl = (pos["tp2"] - pos["entry_price"]) * rem * contract_size
+                portfolio["balance"] += (gross_pnl - exit_fee)
+                portfolio["total_fees_paid"] += exit_fee
+                close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["tp2"], rem, gross_pnl, exit_fee, "TAKE_PROFIT_FULL")
+        else:
+            if low <= pos["sl"]:
+                # Cắn SL ban đầu
+                rem = pos["remaining_contracts"]
+                exit_val = pos["sl"] * rem * contract_size
+                exit_fee = exit_val * TAKER_FEE_RATE
+                gross_pnl = (pos["sl"] - pos["entry_price"]) * rem * contract_size
+                portfolio["balance"] += (gross_pnl - exit_fee)
+                portfolio["total_fees_paid"] += exit_fee
+                close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["sl"], rem, gross_pnl, exit_fee, "STOP_LOSS")
 
-    # --- TRƯỜNG HỢP VỊ THẾ SHORT ---
+    # SHORT POSITION
     elif pos["type"] == "SHORT":
-        # 1. Kiểm tra dừng lỗ (Stop Loss)
-        if high >= pos["sl"]:
-            loss = (pos["entry_price"] - pos["sl"]) * pos["contracts"] * contract_size
-            portfolio["balance"] += loss
-            close_simulated_trade(symbol, "SHORT", pos["entry_price"], pos["sl"], pos["contracts"], loss, "STOP_LOSS")
-            return
+        if not pos["is_tp1_hit"] and low <= pos["tp1"]:
+            tp1_contracts = max(1, contracts // 2)
+            pos["remaining_contracts"] -= tp1_contracts
+            pos["is_tp1_hit"] = True
+            pos["sl"] = pos["entry_price"]
             
-        # 2. Kiểm tra chốt lời (Take Profit)
-        if low <= pos["tp"]:
-            profit = (pos["entry_price"] - pos["tp"]) * pos["contracts"] * contract_size
-            portfolio["balance"] += profit
-            close_simulated_trade(symbol, "SHORT", pos["entry_price"], pos["tp"], pos["contracts"], profit, "TAKE_PROFIT")
-            return
+            exit_val = pos["tp1"] * tp1_contracts * contract_size
+            exit_fee = exit_val * TAKER_FEE_RATE
+            gross_pnl = (pos["entry_price"] - pos["tp1"]) * tp1_contracts * contract_size
+            net_pnl = gross_pnl - exit_fee
+            
+            portfolio["balance"] += net_pnl
+            portfolio["total_fees_paid"] += exit_fee
+            save_portfolio()
+            
+            send_telegram_message(
+                f"🎯 <b>[PULLBACK A - KHỚP TP1 50%] {symbol}</b>\n\n"
+                f"👉 <b>Khớp TP1 giá:</b> {format_price(symbol, pos['tp1'])}\n"
+                f"💰 <b>Lãi ròng TP1:</b> +{net_pnl:.4f} USDT (Đã trừ phí sàn -{exit_fee:.4f} USDT)\n"
+                f"🛡️ <b>ĐÃ TỰ ĐỘNG DỜI STOP LOSS VỀ ENTRY:</b> {format_price(symbol, pos['entry_price'])}\n"
+                f"📊 <b>Số dư tài khoản:</b> {portfolio['balance']:.2f} USDT"
+            )
+            
+        if pos["is_tp1_hit"]:
+            if high >= pos["sl"]:
+                rem = pos["remaining_contracts"]
+                exit_val = pos["sl"] * rem * contract_size
+                exit_fee = exit_val * TAKER_FEE_RATE
+                gross_pnl = (pos["entry_price"] - pos["sl"]) * rem * contract_size
+                portfolio["balance"] += (gross_pnl - exit_fee)
+                portfolio["total_fees_paid"] += exit_fee
+                close_simulated_trade(symbol, "SHORT", pos["entry_price"], pos["sl"], rem, gross_pnl, exit_fee, "SL_BE")
+            elif low <= pos["tp2"]:
+                rem = pos["remaining_contracts"]
+                exit_val = pos["tp2"] * rem * contract_size
+                exit_fee = exit_val * TAKER_FEE_RATE
+                gross_pnl = (pos["entry_price"] - pos["tp2"]) * rem * contract_size
+                portfolio["balance"] += (gross_pnl - exit_fee)
+                portfolio["total_fees_paid"] += exit_fee
+                close_simulated_trade(symbol, "SHORT", pos["entry_price"], pos["tp2"], rem, gross_pnl, exit_fee, "TAKE_PROFIT_FULL")
+        else:
+            if high >= pos["sl"]:
+                rem = pos["remaining_contracts"]
+                exit_val = pos["sl"] * rem * contract_size
+                exit_fee = exit_val * TAKER_FEE_RATE
+                gross_pnl = (pos["entry_price"] - pos["sl"]) * rem * contract_size
+                portfolio["balance"] += (gross_pnl - exit_fee)
+                portfolio["total_fees_paid"] += exit_fee
+                close_simulated_trade(symbol, "SHORT", pos["entry_price"], pos["sl"], rem, gross_pnl, exit_fee, "STOP_LOSS")
 
-# ==========================================================
-# KHỞI TẠO NẾN DỮ LIỆU TỪ OKX API
-# ==========================================================
 def fetch_okx_candles(symbol: str, timeframe: str, limit: int = 250) -> list:
-    """Tải dữ liệu nến từ sàn OKX"""
     try:
-        # OKX sử dụng cấu trúc UTC time
         raw_candles = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         candles = []
         for c in raw_candles:
@@ -377,76 +445,71 @@ def fetch_okx_candles(symbol: str, timeframe: str, limit: int = 250) -> list:
             })
         return candles
     except Exception as e:
-        logger.error(f"🔴 Lỗi tải dữ liệu nến {timeframe} cho {symbol}: {e}")
+        logger.error(f"🔴 Lỗi tải nến {timeframe} cho {symbol}: {e}")
         return []
 
-# ==========================================================
-# QUÉT TÍN HIỆU CHIẾN LƯỢC PULLBACK THUẬN XU HƯỚNG LỚN
-# ==========================================================
 def check_signals_for_symbol(sym: str):
     candles_15m = fetch_okx_candles(sym, INTERVAL)
-    if len(candles_15m) < 220:
-        return
+    if len(candles_15m) < 220: return
         
     current_candle = candles_15m[-1]
-    
-    # 1. Kiểm tra quét TP/SL của vị thế đang mở (dựa trên High/Low nến hiện tại)
     check_active_positions(sym, current_candle)
     
     pos = portfolio["positions"].get(sym)
     last_signal_time = portfolio.get("last_signal_times", {}).get(sym, 0)
-    
     last_closed_candle = candles_15m[-2]
-    idx = len(candles_15m) - 2
     
-    closes_15m = [c["close"] for c in candles_15m]
-    
-    # Tính toán chỉ báo Bollinger Bands, RSI và EMA 200 trên nến 15m
-    basis, upper, lower = calculate_bb(closes_15m, 20, 2.0)
-    rsi = calculate_rsi(closes_15m, 14)
-    ema200 = calculate_ema(closes_15m, 200)
-    
-    close_price = last_closed_candle["close"]
-    rsi_val = rsi[idx]
-    ema_val = ema200[idx]
-    lower_band = lower[idx]
-    upper_band = upper[idx]
-    
-    # Nếu đã xử lý nến này rồi thì bỏ qua
-    if last_closed_candle["time"] <= last_signal_time:
-        return
+    if last_closed_candle["time"] <= last_signal_time: return
         
-    # 2. Kiểm tra tín hiệu mở vị thế mới (khi chưa có vị thế mở cho coin này)
+    closes = [c["close"] for c in candles_15m]
+    vols = [c["volume"] for c in candles_15m]
+    
+    st_val, direction = calculate_supertrend(candles_15m, 10, 2.5)
+    ema20 = calculate_ema(closes, 20)
+    vol_ma = calculate_vol_ma(vols, 20)
+    
+    idx = len(candles_15m) - 2
+    curr_dir = direction[idx]
+    c_last = last_closed_candle
+    
+    # -------------------------------------------------------------
+    # PULLBACK ENTRY STRATEGY LOGIC (OPTION A)
+    # -------------------------------------------------------------
     if pos is None:
-        # XU HƯỚNG TĂNG: Giá nằm trên EMA 200 -> Chỉ canh Mua rải (LONG) khi pullback
-        if close_price > ema_val:
-            if close_price < lower_band and rsi_val <= 30:
-                sl = close_price * (1.0 - SL_PCT)
-                tp = close_price * (1.0 + TP_PCT)
-                contracts = calculate_contracts(sym, close_price)
-                
+        # LONG: Supertrend XANH (1), Nến lùi về EMA20 (low <= ema20), đóng trên EMA20 (close > ema20), Vol > 1.2x MA20
+        is_long = (curr_dir == 1) and (c_last["low"] <= ema20[idx]) and (c_last["close"] > ema20[idx]) and (c_last["volume"] > 1.2 * vol_ma[idx])
+        
+        # SHORT: Supertrend ĐỎ (-1), Nến hồi lên EMA20 (high >= ema20), đóng dưới EMA20 (close < ema20), Vol > 1.2x MA20
+        is_short = (curr_dir == -1) and (c_last["high"] >= ema20[idx]) and (c_last["close"] < ema20[idx]) and (c_last["volume"] > 1.2 * vol_ma[idx])
+        
+        close_price = c_last["close"]
+        
+        if is_long:
+            sl = min(c_last["low"], st_val[idx])
+            sl_dist = close_price - sl
+            if 0 < sl_dist / close_price <= 0.008: # SL siêu ngắn <= 0.8%
+                tp1 = close_price + sl_dist * 1.5
+                tp2 = close_price + sl_dist * 3.0
+                contracts = calculate_contracts(sym, close_price, sl)
                 portfolio["last_signal_times"][sym] = last_closed_candle["time"]
-                open_simulated_position(sym, "LONG", close_price, sl, tp, contracts)
+                open_simulated_position(sym, "LONG", close_price, sl, tp1, tp2, contracts)
                 
-        # XU HƯỚNG GIẢM: Giá nằm dưới EMA 200 -> Chỉ canh Bán rải (SHORT) khi pullback
-        elif close_price < ema_val:
-            if close_price > upper_band and rsi_val >= 70:
-                sl = close_price * (1.0 + SL_PCT)
-                tp = close_price * (1.0 - TP_PCT)
-                contracts = calculate_contracts(sym, close_price)
-                
+        elif is_short:
+            sl = max(c_last["high"], st_val[idx])
+            sl_dist = sl - close_price
+            if 0 < sl_dist / close_price <= 0.008:
+                tp1 = close_price - sl_dist * 1.5
+                tp2 = close_price - sl_dist * 3.0
+                contracts = calculate_contracts(sym, close_price, sl)
                 portfolio["last_signal_times"][sym] = last_closed_candle["time"]
-                open_simulated_position(sym, "SHORT", close_price, sl, tp, contracts)
+                open_simulated_position(sym, "SHORT", close_price, sl, tp1, tp2, contracts)
 
-# ==========================================================
-# KHỞI CHẠY MÁY CHỦ HEALTH CHECK SERVER
-# ==========================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        balance_str = f"OK - Pullback Paper Balance: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT"
+        balance_str = f"OK - Pullback A Paper Balance: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT | Total Fees Paid: {portfolio.get('total_fees_paid', 0.0):.4f} USDT"
         self.wfile.write(balance_str.encode('utf-8'))
         
     def do_HEAD(self):
@@ -458,54 +521,45 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         return
 
 def start_health_server():
-    # Sử dụng cổng PORT của Render nếu có, mặc định là PORT_PULLBACK hoặc 10002
     port = int(os.environ.get("PORT", os.environ.get("PORT_PULLBACK", 10002)))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logger.info(f"🌐 Đã khởi chạy máy chủ Health Check cho Pullback Bot trên cổng {port}.")
+    logger.info(f"🌐 Máy chủ Health Check Pullback A chạy trên cổng {port}.")
     server.serve_forever()
 
-# ==========================================================
-# KHỞI ĐỘNG HỆ THỐNG
-# ==========================================================
 if __name__ == "__main__":
-    logger.info("🚀 Khởi động Bot OKX Paper Pullback (Đọc API thật - Thuận xu hướng lớn)...")
-    
-    # Đồng bộ hóa thị trường sàn OKX để lấy thông tin lotSize, contractSize
+    logger.info("🚀 Khởi động Bot OKX Paper Pullback A (Có trừ phí sàn Taker 0.05% thực tế)...")
     try:
         exchange.load_markets()
-        logger.info("✅ Đã kết nối và nạp danh sách sản phẩm sàn OKX.")
+        logger.info("✅ Đã kết nối OKX API.")
     except Exception as e:
-        logger.error(f"🔴 Không thể nạp thị trường OKX: {e}")
+        logger.error(f"🔴 Không thể kết nối OKX: {e}")
         sys.exit(1)
         
-    load_portfolio()
+    # Reset portfolio để chạy lại bản Pullback A mới sạch sẽ
+    init_new_portfolio()
     
-    # Khởi chạy server kiểm tra sức khỏe chạy nền
     server_thread = threading.Thread(target=start_health_server, daemon=True)
     server_thread.start()
     
-    # Gửi thông báo khởi động lên Telegram
     send_telegram_message(
-        f"🚀 <b>BOT MÔ PHỎNG OKX PULLBACK KHỞI CHẠY THÀNH CÔNG!</b>\n\n"
-        f"📈 <b>Cấu hình chiến thuật:</b>\n"
-        f"- Bollinger Bands + RSI thuận EMA 200 15m\n"
-        f"- Cắt lỗ SL: 0.8% | Chốt lời TP: 1.2% (R:R = 1.5)\n"
+        f"🚀 <b>BOT MÔ PHỎNG PULLBACK A (NÂNG CẤP TRỪ PHÍ SÀN THẬT) KHỞI CHẠY!</b>\n\n"
+        f"📈 <b>Cấu hình chiến thuật hoàn toàn mới:</b>\n"
+        f"- Bắt nến lùi chạm EMA 20 rút râu thuận Supertrend\n"
+        f"- Cắt lỗ SL siêu ngắn <= 0.8% | TP1: 1.5R (50%) | TP2: 3.0R (50%)\n"
+        f"- <b>TỰ ĐỘNG TRỪ PHÍ SÀN OKX THẬT:</b> 0.05% Taker mở/đóng\n"
         f"- Danh mục quét: {len(SYMBOLS)} coins\n"
-        f"💵 <b>Vốn ban đầu:</b> {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT"
+        f"💵 <b>Vốn khởi tạo mới:</b> {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT"
     )
     
-    # Vòng lặp chính quét tín hiệu mỗi 30 giây
     while True:
         try:
-            logger.debug("🔍 Bắt đầu chu kỳ quét tín hiệu Pullback...")
             for symbol in SYMBOLS:
                 check_signals_for_symbol(symbol)
-                time.sleep(1) # Tránh rate limit của sàn
-            logger.debug("⏳ Chu kỳ quét hoàn thành. Chờ 30 giây...")
+                time.sleep(1)
             time.sleep(30)
         except KeyboardInterrupt:
             logger.info("⏹️ Đang tắt bot...")
             sys.exit(0)
         except Exception as e:
-            logger.error(f"🔴 Lỗi trong vòng lặp chính của Bot: {e}")
+            logger.error(f"🔴 Lỗi trong vòng lặp chính: {e}")
             time.sleep(15)
