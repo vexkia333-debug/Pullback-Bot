@@ -51,8 +51,7 @@ if not OKX_API_KEY or not OKX_SECRET_KEY or not OKX_PASSPHRASE:
     sys.exit(1)
 
 SYMBOLS = [
-    "ETH-USDT-SWAP", "LINK-USDT-SWAP", "TRX-USDT-SWAP", "XRP-USDT-SWAP", 
-    "AVAX-USDT-SWAP", "SOL-USDT-SWAP", "DOGE-USDT-SWAP", "ARB-USDT-SWAP"
+    "LINK-USDT-SWAP", "XRP-USDT-SWAP", "DOGE-USDT-SWAP", "AVAX-USDT-SWAP"
 ]
 INTERVAL = "15m"
 PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "okx_pullback_portfolio.json")
