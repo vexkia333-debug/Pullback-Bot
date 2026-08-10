@@ -21,7 +21,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("okx-paper-ema-macd-bot")
+logger = logging.getLogger("okx-paper-pullback-bot")
 
 # Tải cấu hình từ tệp .env nếu có (chạy cục bộ)
 if os.path.exists(".env"):
@@ -50,20 +50,16 @@ if not OKX_API_KEY or not OKX_SECRET_KEY or not OKX_PASSPHRASE:
     logger.error("🔴 Lỗi: Chưa cấu hình đầy đủ OKX_API_KEY, OKX_SECRET_KEY hoặc OKX_PASSPHRASE!")
     sys.exit(1)
 
-# Đã lọc bỏ 2 coin nhiễu ETH & SOL, giữ lại 6 coin hiệu suất cao nhất
 SYMBOLS = [
-    "LINK-USDT-SWAP", "TRX-USDT-SWAP", "XRP-USDT-SWAP", 
-    "AVAX-USDT-SWAP", "DOGE-USDT-SWAP", "ARB-USDT-SWAP"
+    "LINK-USDT-SWAP", "XRP-USDT-SWAP", "DOGE-USDT-SWAP"
 ]
 INTERVAL = "15m"
-PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "okx_ema_macd_portfolio.json")
+PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "okx_pullback_portfolio.json")
 
-# Quản trị rủi ro & Tham số chiến thuật EMA 10/30 Crossover + MACD Filter
-RISK_PERCENT = 2.0                          # Rủi ro 2% tài khoản mỗi lệnh
+RISK_PERCENT = 2.0                          # Rủi ro 2% tài khoản mỗi lệnh (An toàn)
 INITIAL_BALANCE = 100.0                     # Vốn giả lập ban đầu 100 USDT
-SL_PCT = 0.007                              # Cắt lỗ cố định 0.7% (Đã tối ưu né bẫy giật râu 15m)
-TP1_RATIO = 1.5                             # TP1 = 1.5R (1.05%)
-TP2_RATIO = 3.0                             # TP2 = 3.0R (2.10%)
+MIN_SL_PCT = 0.008                          # Giới hạn Stop Loss tối thiểu 0.8% để triệt tiêu bẫy râu nhiễu 15m
+MAX_SL_PCT = 0.012                          # Giới hạn Stop Loss tối đa 1.2%
 TAKER_FEE_RATE = 0.0005                     # Phí sàn OKX Taker 0.05% mỗi chiều
 
 exchange = ccxt.okx({
@@ -92,7 +88,7 @@ def save_portfolio():
         os.makedirs(os.path.dirname(PORTFOLIO_FILE), exist_ok=True)
         with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
             json.dump(portfolio, f, indent=4, ensure_ascii=False)
-        logger.debug("💾 Đã cập nhật danh mục giả lập EMA 10/30.")
+        logger.debug("💾 Đã cập nhật danh mục giả lập Pullback A.")
     except Exception as e:
         logger.error(f"🔴 Lỗi ghi file portfolio JSON: {e}")
 
@@ -109,7 +105,7 @@ def init_new_portfolio():
         portfolio["positions"][sym] = None
         portfolio["last_signal_times"][sym] = 0
     save_portfolio()
-    logger.info(f"✨ Khởi tạo danh mục giả lập EMA 10/30 mới với số dư: {INITIAL_BALANCE} USDT")
+    logger.info(f"✨ Khởi tạo danh mục giả lập Pullback A mới với số dư: {INITIAL_BALANCE} USDT")
 
 def load_portfolio():
     global portfolio
@@ -126,7 +122,7 @@ def load_portfolio():
                     portfolio["positions"][sym] = None
                 if sym not in portfolio["last_signal_times"]:
                     portfolio["last_signal_times"][sym] = 0
-            logger.info(f"💾 Đã nạp danh mục giả lập EMA 10/30. Số dư hiện tại: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT")
+            logger.info(f"💾 Đã nạp danh mục giả lập Pullback A. Số dư hiện tại: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT")
         except Exception as e:
             logger.error(f"🔴 Lỗi đọc file portfolio JSON: {e}")
             init_new_portfolio()
@@ -168,20 +164,46 @@ def calculate_ema(prices: list, length: int) -> list:
         ema[i] = prices[i] * alpha + ema[i - 1] * (1 - alpha)
     return ema
 
+def calculate_atr(candles: list, length: int = 14) -> list:
+    n = len(candles)
+    atr = [0.0] * n
+    if n <= length: return atr
+    tr = [0.0] * n
+    for i in range(1, n):
+        h, l, pc = candles[i]["high"], candles[i]["low"], candles[i-1]["close"]
+        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
+    atr[length] = sum(tr[1:length+1]) / length
+    for i in range(length + 1, n):
+        atr[i] = (atr[i-1] * (length - 1) + tr[i]) / length
+    return atr
+
+def calculate_supertrend(candles: list, period: int = 10, multiplier: float = 2.5):
+    n = len(candles)
+    atr = calculate_atr(candles, period)
+    hl2 = [(c["high"] + c["low"]) / 2 for c in candles]
+    basic_upper, basic_lower = [0.0]*n, [0.0]*n
+    final_upper, final_lower = [0.0]*n, [0.0]*n
+    st = [0.0] * n
+    direction = [1] * n
+    for i in range(period, n):
+        basic_upper[i] = hl2[i] + multiplier * atr[i]
+        basic_lower[i] = hl2[i] - multiplier * atr[i]
+        if i == period:
+            final_upper[i] = basic_upper[i]
+            final_lower[i] = basic_lower[i]
+        else:
+            final_upper[i] = basic_upper[i] if basic_upper[i] < final_upper[i-1] or candles[i-1]["close"] > final_upper[i-1] else final_upper[i-1]
+            final_lower[i] = basic_lower[i] if basic_lower[i] > final_lower[i-1] or candles[i-1]["close"] < final_lower[i-1] else final_lower[i-1]
+        direction[i] = 1 if candles[i]["close"] > final_upper[i-1] else (-1 if candles[i]["close"] < final_lower[i-1] else direction[i-1])
+        st[i] = final_upper[i] if direction[i] == -1 else final_lower[i]
+    return st, direction
+
 def calculate_vol_ma(volumes: list, length: int = 20) -> list:
     ma = [0.0] * len(volumes)
     if len(volumes) < length: return ma
     for i in range(length - 1, len(volumes)):
         ma[i] = sum(volumes[i - length + 1 : i + 1]) / length
     return ma
-
-def calculate_macd(prices: list, fast: int = 12, slow: int = 26, signal: int = 9):
-    ema_fast = calculate_ema(prices, fast)
-    ema_slow = calculate_ema(prices, slow)
-    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
-    signal_line = calculate_ema(macd_line, signal)
-    histogram = [m - sig for m, sig in zip(macd_line, signal_line)]
-    return macd_line, signal_line, histogram
 
 # ==========================================================
 # TRADING OPERATIONS WITH REAL EXCHANGE FEE DEDUCTION
@@ -240,9 +262,9 @@ def open_simulated_position(symbol: str, order_type: str, entry: float, sl: floa
     sl_dist_pct = (abs(entry - sl) / entry) * 100.0
     
     msg = (
-        f"{emoji} <b>[EMA 10/30 - MỞ LỆNH] {order_type} {symbol} ({INTERVAL})</b>\n\n"
+        f"{emoji} <b>[PULLBACK A - MỞ LỆNH] {order_type} {symbol} ({INTERVAL})</b>\n\n"
         f"🎟️ <b>Khối lượng:</b> {contracts} Hợp đồng\n"
-        f"👉 <b>Giá vào lệnh (EMA Cross + MACD):</b> {format_price(symbol, entry)}\n"
+        f"👉 <b>Giá vào lệnh:</b> {format_price(symbol, entry)}\n"
         f"🛡️ <b>Stop Loss ({sl_dist_pct:.2f}%):</b> {format_price(symbol, sl)} (Rủi ro: -{risk_amount:.2f} USDT)\n"
         f"🎯 <b>TP1 (1.5R):</b> {format_price(symbol, tp1)} | <b>TP2 (3.0R):</b> {format_price(symbol, tp2)}\n"
         f"💸 <b>Phí mở lệnh OKX (0.05% Taker):</b> -{entry_fee:.4f} USDT\n\n"
@@ -272,6 +294,8 @@ def close_simulated_trade(symbol: str, order_type: str, entry: float, exit_price
     save_portfolio()
     
     emoji = "🔴" if net_pnl < 0 else "🟢"
+    
+    # Gán nhãn lý do đóng lệnh chính xác tuyệt đối
     if reason == "STOP_LOSS":
         action_str = "DỪNG LỖ (SL Ban Đầu)"
     elif reason == "SL_BE":
@@ -282,7 +306,7 @@ def close_simulated_trade(symbol: str, order_type: str, entry: float, exit_price
         action_str = reason
     
     msg = (
-        f"{emoji} <b>[EMA 10/30 - ĐÓNG LỆNH] {symbol} ({action_str})</b>\n\n"
+        f"{emoji} <b>[PULLBACK A - ĐÓNG LỆNH] {symbol} ({action_str})</b>\n\n"
         f"🎟️ <b>Loại vị thế:</b> {order_type} ({contracts} contracts)\n"
         f"👉 <b>Entry:</b> {format_price(symbol, entry)} | <b>Exit:</b> {format_price(symbol, exit_price)}\n"
         f"💵 <b>Lợi nhuận gộp:</b> {gross_pnl:+.4f} USDT\n"
@@ -308,13 +332,16 @@ def check_active_positions(symbol: str, current_candle: dict):
 
     contracts = pos["remaining_contracts"]
     
+    # -------------------------------------------------------------
     # LONG POSITION
+    # -------------------------------------------------------------
     if pos["type"] == "LONG":
+        # 1. Nếu chưa chạm TP1, kiểm tra xem nến có đẩy lên TP1 không
         if not pos["is_tp1_hit"] and high >= pos["tp1"]:
             tp1_contracts = max(1, contracts // 2)
             pos["remaining_contracts"] -= tp1_contracts
             pos["is_tp1_hit"] = True
-            pos["sl"] = pos["entry_price"]
+            pos["sl"] = pos["entry_price"] # Dời SL về Entry
             
             exit_val = pos["tp1"] * tp1_contracts * contract_size
             exit_fee = exit_val * TAKER_FEE_RATE
@@ -326,16 +353,18 @@ def check_active_positions(symbol: str, current_candle: dict):
             save_portfolio()
             
             send_telegram_message(
-                f"🎯 <b>[EMA 10/30 - KHỚP TP1 50%] {symbol}</b>\n\n"
+                f"🎯 <b>[PULLBACK A - KHỚP TP1 50%] {symbol}</b>\n\n"
                 f"👉 <b>Khớp TP1 giá:</b> {format_price(symbol, pos['tp1'])}\n"
                 f"💰 <b>Lãi ròng TP1:</b> +{net_pnl:.4f} USDT (Đã trừ phí sàn -{exit_fee:.4f} USDT)\n"
                 f"🛡️ <b>ĐÃ TỰ ĐỘNG DỜI STOP LOSS VỀ ENTRY:</b> {format_price(symbol, pos['entry_price'])}\n"
                 f"📊 <b>Số dư tài khoản:</b> {portfolio['balance']:.2f} USDT"
             )
-            return
+            return # Thoát hàm nến này, chờ nến tiếp theo mới xét TP2 / SL_BE
 
+        # 2. Sau khi đã dời SL về Entry
         if pos["is_tp1_hit"]:
             if low <= pos["sl"]:
+                # Thoát phần còn lại tại hòa vốn Entry
                 rem = pos["remaining_contracts"]
                 exit_val = pos["sl"] * rem * contract_size
                 exit_fee = exit_val * TAKER_FEE_RATE
@@ -344,6 +373,7 @@ def check_active_positions(symbol: str, current_candle: dict):
                 portfolio["total_fees_paid"] += exit_fee
                 close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["sl"], rem, gross_pnl, exit_fee, "SL_BE")
             elif high >= pos["tp2"]:
+                # Khớp TP2 trọn vẹn
                 rem = pos["remaining_contracts"]
                 exit_val = pos["tp2"] * rem * contract_size
                 exit_fee = exit_val * TAKER_FEE_RATE
@@ -353,6 +383,7 @@ def check_active_positions(symbol: str, current_candle: dict):
                 close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["tp2"], rem, gross_pnl, exit_fee, "TAKE_PROFIT_FULL")
         else:
             if low <= pos["sl"]:
+                # Cắn SL ban đầu
                 rem = pos["remaining_contracts"]
                 exit_val = pos["sl"] * rem * contract_size
                 exit_fee = exit_val * TAKER_FEE_RATE
@@ -361,7 +392,9 @@ def check_active_positions(symbol: str, current_candle: dict):
                 portfolio["total_fees_paid"] += exit_fee
                 close_simulated_trade(symbol, "LONG", pos["entry_price"], pos["sl"], rem, gross_pnl, exit_fee, "STOP_LOSS")
 
+    # -------------------------------------------------------------
     # SHORT POSITION
+    # -------------------------------------------------------------
     elif pos["type"] == "SHORT":
         if not pos["is_tp1_hit"] and low <= pos["tp1"]:
             tp1_contracts = max(1, contracts // 2)
@@ -379,7 +412,7 @@ def check_active_positions(symbol: str, current_candle: dict):
             save_portfolio()
             
             send_telegram_message(
-                f"🎯 <b>[EMA 10/30 - KHỚP TP1 50%] {symbol}</b>\n\n"
+                f"🎯 <b>[PULLBACK A - KHỚP TP1 50%] {symbol}</b>\n\n"
                 f"👉 <b>Khớp TP1 giá:</b> {format_price(symbol, pos['tp1'])}\n"
                 f"💰 <b>Lãi ròng TP1:</b> +{net_pnl:.4f} USDT (Đã trừ phí sàn -{exit_fee:.4f} USDT)\n"
                 f"🛡️ <b>ĐÃ TỰ ĐỘNG DỜI STOP LOSS VỀ ENTRY:</b> {format_price(symbol, pos['entry_price'])}\n"
@@ -448,41 +481,59 @@ def check_signals_for_symbol(sym: str):
     closes = [c["close"] for c in candles_15m]
     vols = [c["volume"] for c in candles_15m]
     
-    ema10 = calculate_ema(closes, 10)
-    ema30 = calculate_ema(closes, 30)
+    st_val, direction = calculate_supertrend(candles_15m, 10, 2.5)
+    ema20 = calculate_ema(closes, 20)
     vol_ma = calculate_vol_ma(vols, 20)
-    macd_line, signal_line, histogram = calculate_macd(closes, 12, 26, 9)
     
     idx = len(candles_15m) - 2
+    curr_dir = direction[idx]
     c_last = last_closed_candle
     
     # -------------------------------------------------------------
-    # LOGIC GIAO CẮT EMA 10/30 + VOLUME BREAKOUT + MACD FILTER
+    # PULLBACK ENTRY STRATEGY LOGIC (OPTION A CHUẨN HOÁ SL TOÁN HỌC)
     # -------------------------------------------------------------
     if pos is None:
-        # LONG: EMA 10 cắt lên EMA 30 + Volume > 1.3x Vol MA + MACD Histogram > 0
-        is_long = (ema10[idx] > ema30[idx]) and (ema10[idx-1] <= ema30[idx-1]) and (c_last["volume"] > 1.3 * vol_ma[idx]) and (histogram[idx] > 0)
-        
-        # SHORT: EMA 10 cắt xuống EMA 30 + Volume > 1.3x Vol MA + MACD Histogram < 0
-        is_short = (ema10[idx] < ema30[idx]) and (ema10[idx-1] >= ema30[idx-1]) and (c_last["volume"] > 1.3 * vol_ma[idx]) and (histogram[idx] < 0)
+        is_long = (curr_dir == 1) and (c_last["low"] <= ema20[idx]) and (c_last["close"] > ema20[idx]) and (c_last["volume"] > 1.2 * vol_ma[idx])
+        is_short = (curr_dir == -1) and (c_last["high"] >= ema20[idx]) and (c_last["close"] < ema20[idx]) and (c_last["volume"] > 1.2 * vol_ma[idx])
         
         close_price = c_last["close"]
         
         if is_long:
-            sl_dist = close_price * SL_PCT # Stop Loss cố định 0.7% né bẫy râu 15m
-            sl = close_price - sl_dist
-            tp1 = close_price + sl_dist * TP1_RATIO
-            tp2 = close_price + sl_dist * TP2_RATIO
+            raw_sl = min(c_last["low"], st_val[idx])
+            sl_dist_pct = (close_price - raw_sl) / close_price
+            
+            # Ép khoảng cách SL tối thiểu 0.5% để tránh bẫy râu nến siêu vi và trượt phí
+            if sl_dist_pct < MIN_SL_PCT:
+                sl_dist_pct = MIN_SL_PCT
+                sl = close_price * (1.0 - MIN_SL_PCT)
+            elif sl_dist_pct > MAX_SL_PCT:
+                return # Bỏ qua nếu SL quá xa > 1.0%
+            else:
+                sl = raw_sl
+                
+            sl_dist = close_price - sl
+            tp1 = close_price + sl_dist * 1.5
+            tp2 = close_price + sl_dist * 3.0
             contracts = calculate_contracts(sym, close_price, sl)
             
             portfolio["last_signal_times"][sym] = last_closed_candle["time"]
             open_simulated_position(sym, "LONG", close_price, sl, tp1, tp2, contracts)
                 
         elif is_short:
-            sl_dist = close_price * SL_PCT
-            sl = close_price + sl_dist
-            tp1 = close_price - sl_dist * TP1_RATIO
-            tp2 = close_price - sl_dist * TP2_RATIO
+            raw_sl = max(c_last["high"], st_val[idx])
+            sl_dist_pct = (raw_sl - close_price) / close_price
+            
+            if sl_dist_pct < MIN_SL_PCT:
+                sl_dist_pct = MIN_SL_PCT
+                sl = close_price * (1.0 + MIN_SL_PCT)
+            elif sl_dist_pct > MAX_SL_PCT:
+                return
+            else:
+                sl = raw_sl
+                
+            sl_dist = sl - close_price
+            tp1 = close_price - sl_dist * 1.5
+            tp2 = close_price - sl_dist * 3.0
             contracts = calculate_contracts(sym, close_price, sl)
             
             portfolio["last_signal_times"][sym] = last_closed_candle["time"]
@@ -493,7 +544,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        balance_str = f"OK - EMA 10/30 Paper Balance: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT | Total Fees Paid: {portfolio.get('total_fees_paid', 0.0):.4f} USDT"
+        balance_str = f"OK - Pullback A Paper Balance: {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT | Total Fees Paid: {portfolio.get('total_fees_paid', 0.0):.4f} USDT"
         self.wfile.write(balance_str.encode('utf-8'))
         
     def do_HEAD(self):
@@ -505,13 +556,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         return
 
 def start_health_server():
-    port = int(os.environ.get("PORT", os.environ.get("PORT_EMA", 10004)))
+    port = int(os.environ.get("PORT", os.environ.get("PORT_PULLBACK", 10002)))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logger.info(f"🌐 Máy chủ Health Check EMA 10/30 chạy trên cổng {port}.")
+    logger.info(f"🌐 Máy chủ Health Check Pullback A chạy trên cổng {port}.")
     server.serve_forever()
 
 if __name__ == "__main__":
-    logger.info("🚀 Khởi động Bot OKX Paper EMA 10/30 Crossover + MACD Filter (6 Coin tuyển chọn)...")
+    logger.info("🚀 Khởi động Bot OKX Paper Pullback A (Đã sửa lỗi logic nhãn & Giới hạn SL tối thiểu 0.5%)...")
     try:
         exchange.load_markets()
         logger.info("✅ Đã kết nối OKX API.")
@@ -525,13 +576,13 @@ if __name__ == "__main__":
     server_thread.start()
     
     send_telegram_message(
-        f"🚀 <b>BOT MÔ PHỎNG EMA 10/30 + MACD FILTER (6 COIN TUYỂN CHỌN) KHỞI CHẠY!</b>\n\n"
-        f"📈 <b>Cấu hình chiến thuật nâng cấp:</b>\n"
-        f"- Giao cắt EMA 10/30 + Khối lượng Vol > 1.3x Vol MA20 + Động lượng MACD Histogram\n"
-        f"- Danh mục 6 coin tuyển chọn: LINK, TRX, XRP, AVAX, DOGE, ARB (Loại bỏ ETH & SOL nhiễu)\n"
-        f"- Cắt lỗ SL chuẩn hóa 0.7% | TP1: 1.5R (50%) | TP2: 3.0R (50%)\n"
+        f"🚀 <b>BOT MÔ PHỎNG PULLBACK A (ĐÃ SỬA LỖI LOGIC & GIỚI HẠN SL TOÁN HỌC) KHỞI CHẠY!</b>\n\n"
+        f"📈 <b>Cấu hình chiến thuật:</b>\n"
+        f"- Nến lùi EMA20 rút râu thuận Supertrend\n"
+        f"- Cắt lỗ SL chuẩn hóa: Minimum 0.5% (Tránh bẫy râu nhiễu & Phí bùng nổ)\n"
+        f"- TP1: 1.5R (50%) | TP2: 3.0R (50%)\n"
         f"- <b>TỰ ĐỘNG TRỪ PHÍ SÀN OKX THẬT:</b> 0.05% Taker mở/đóng\n"
-        f"💵 <b>Vốn khởi tạo:</b> {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT"
+        f"💵 <b>Vốn khởi tạo sạch:</b> {portfolio.get('balance', INITIAL_BALANCE):.2f} USDT"
     )
     
     while True:
