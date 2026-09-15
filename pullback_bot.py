@@ -131,6 +131,11 @@ def send_telegram_message(text, reply_markup=None):
         logger.error(f"🔴 Lỗi gửi Telegram: {e}")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -287,7 +292,12 @@ def scout_trending_funny_videos(limit=5):
         'extract_flat': True,
         'quiet': True,
         'skip_download': True,
-        'ffmpeg_location': ffmpeg_exe
+        'ffmpeg_location': ffmpeg_exe,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb']
+            }
+        }
     }
     
     db = load_processed_db()
@@ -332,13 +342,18 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
         f"⏳ <i>Đang tự động tải về và xử lý lách bản quyền...</i>"
     )
     
-    # 1. Tải video
+    # 1. Tải video (Dùng player_client android/ios để tránh 429 trên Cloud/Render)
     ydl_opts = {
         'outtmpl': raw_file,
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
         'ffmpeg_location': ffmpeg_exe,
         'quiet': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb']
+            }
+        }
     }
     
     try:
@@ -416,9 +431,14 @@ def execute_auto_scout_job():
         logger.info("ℹ️ Không tìm thấy video mới hoặc tất cả đã được xử lý.")
         return False
         
-    target = candidates[0]
-    logger.info(f"🎯 Đã chọn được video hot: {target['id']} - {target['title']}")
-    return download_and_process_video(target['url'], target['id'], target['title'], "Hệ thống tự động săn xu hướng")
+    for target in candidates[:3]:
+        logger.info(f"🎯 Đang thử tải video hot: {target['id']} - {target['title']}")
+        success = download_and_process_video(target['url'], target['id'], target['title'], "Hệ thống tự động săn xu hướng")
+        if success:
+            return True
+        logger.warning(f"⚠️ Video {target['id']} không thể tải, thử video tiếp theo...")
+        
+    return False
 
 async def auto_scout_loop():
     """Vòng lặp tự động chạy quét video theo giờ quy định"""
