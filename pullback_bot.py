@@ -368,50 +368,74 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     chosen_kw = random.choice(keywords)
     logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{chosen_kw}'...")
     
-    url = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/video"
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": "tokapi-mobile-version.p.rapidapi.com"
-    }
-    params = {
-        "keyword": chosen_kw,
-        "count": 10
     }
     
     db = load_processed_db()
     processed_ids = set(db.get("videos", []))
     candidates = []
     
+    # 1. Endpoint chính: /v1/search/post (tìm kiếm video theo từ khóa, sắp xếp theo Most Liked)
+    url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
+    params_post = {
+        "keyword": chosen_kw,
+        "count": 10,
+        "region": "VN",
+        "sort_type": "1"  # 1: Most liked (triệu view / viral nhất)
+    }
+    
+    aweme_list = []
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=15)
+        r = requests.get(url_post, headers=headers, params=params_post, timeout=15)
         if r.status_code == 200:
             data = r.json()
-            aweme_list = data.get("aweme_list", []) or data.get("data", []) or []
-            for item in aweme_list:
-                v_id = str(item.get("aweme_id") or item.get("id") or "")
-                if not v_id or v_id in processed_ids:
-                    continue
-                    
-                title = item.get("desc") or "Video Hài Hước TikTok Douyin"
-                play_addr = item.get("video", {}).get("play_addr", {})
-                url_list = play_addr.get("url_list", [])
-                if not url_list:
-                    download_addr = item.get("video", {}).get("download_addr", {})
-                    url_list = download_addr.get("url_list", [])
-                    
-                if url_list:
-                    candidates.append({
-                        "id": v_id,
-                        "title": title,
-                        "url": url_list[0],
-                        "is_direct_cdn": True,
-                        "duration": 30
-                    })
-            logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin mới không watermark!")
+            aweme_list = data.get("aweme_list", []) or data.get("data", []) or data.get("items", []) or []
         else:
-            logger.warning(f"⚠️ RapidAPI status: {r.status_code} - {r.text[:150]}")
+            logger.warning(f"⚠️ RapidAPI /v1/search/post status: {r.status_code} - {r.text[:150]}")
     except Exception as e:
-        logger.error(f"🔴 Lỗi gọi RapidAPI: {e}")
+        logger.error(f"🔴 Lỗi gọi RapidAPI /v1/search/post: {e}")
+        
+    # 2. Endpoint dự phòng: /v1/feed/recommended (khám phá video xu hướng thịnh hành)
+    if not aweme_list:
+        try:
+            url_rec = "https://tokapi-mobile-version.p.rapidapi.com/v1/feed/recommended"
+            r_rec = requests.get(url_rec, headers=headers, params={"pull_type": "0", "region": "VN", "count": 10}, timeout=15)
+            if r_rec.status_code == 200:
+                data_rec = r_rec.json()
+                aweme_list = data_rec.get("aweme_list", []) or data_rec.get("data", []) or data_rec.get("items", []) or []
+            else:
+                logger.warning(f"⚠️ RapidAPI /v1/feed/recommended status: {r_rec.status_code} - {r_rec.text[:150]}")
+        except Exception as e:
+            logger.error(f"🔴 Lỗi gọi RapidAPI /v1/feed/recommended: {e}")
+            
+    # Phân tích danh sách video lấy được từ TokApi
+    for item in aweme_list:
+        v_id = str(item.get("aweme_id") or item.get("id") or "")
+        if not v_id or v_id in processed_ids:
+            continue
+            
+        title = item.get("desc") or "Video Hài Hước TikTok Douyin"
+        play_addr = item.get("video", {}).get("play_addr", {})
+        url_list = play_addr.get("url_list", [])
+        if not url_list:
+            download_addr = item.get("video", {}).get("download_addr", {})
+            url_list = download_addr.get("url_list", [])
+            
+        if url_list:
+            candidates.append({
+                "id": v_id,
+                "title": title,
+                "url": url_list[0],
+                "is_direct_cdn": True,
+                "duration": 30
+            })
+            
+    if candidates:
+        logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin mới không watermark!")
+    else:
+        logger.info("ℹ️ [RapidAPI TokApi] Chưa tìm thấy video mới từ TokApi, chuyển qua kênh phụ...")
         
     return candidates
 
