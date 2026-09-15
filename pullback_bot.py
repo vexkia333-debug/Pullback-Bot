@@ -90,24 +90,72 @@ try:
     from googleapiclient.http import MediaFileUpload
     from google.oauth2 import service_account
     
-    sa_json_raw = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
-    sa_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", SERVICE_ACCOUNT_FILE)
+    # Ưu tiên 1: Kết nối chính chủ qua OAuth 2.0 (Dùng trọn vẹn 5TB cá nhân không lo storageQuotaExceeded)
+    oauth_refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN")
+    oauth_client_id = os.environ.get("GDRIVE_CLIENT_ID")
+    oauth_client_secret = os.environ.get("GDRIVE_CLIENT_SECRET")
     
-    if sa_json_raw:
-        sa_info = json.loads(sa_json_raw)
-        creds = service_account.Credentials.from_service_account_info(
-            sa_info, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        gdrive_service = build('drive', 'v3', credentials=creds)
-        logger.info("✅ Đã kết nối Google Drive API thành công qua biến môi trường GDRIVE_SERVICE_ACCOUNT_JSON!")
-    elif os.path.exists(sa_path):
-        creds = service_account.Credentials.from_service_account_file(
-            sa_path, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        gdrive_service = build('drive', 'v3', credentials=creds)
-        logger.info(f"✅ Đã kết nối thành công Google Drive API qua file: {sa_path}")
-    else:
-        logger.info(f"ℹ️ Chưa cấu hình Service Account. Video sẽ được lưu tạm tại data/douyin_funny_output/")
+    if oauth_refresh_token and oauth_client_id and oauth_client_secret:
+        try:
+            from google.oauth2.credentials import Credentials
+            creds = Credentials(
+                None,
+                refresh_token=oauth_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=oauth_client_id,
+                client_secret=oauth_client_secret,
+                scopes=['https://www.googleapis.com/auth/drive']
+            )
+            gdrive_service = build('drive', 'v3', credentials=creds)
+            logger.info("✅ Đã kết nối Google Drive API thành công qua OAuth 2.0 (Dùng trọn vẹn 5TB chính chủ)!")
+        except Exception as e_oauth:
+            logger.error(f"🔴 Lỗi kết nối Google Drive qua OAuth 2.0: {e_oauth}")
+
+    # Ưu tiên 2: Kết nối qua Service Account (GDRIVE_SERVICE_ACCOUNT_JSON)
+    if not gdrive_service:
+        sa_json_raw = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
+        sa_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", SERVICE_ACCOUNT_FILE)
+        render_secret_path = "/etc/secrets/service_account.json"
+        
+        if sa_json_raw and sa_json_raw.strip():
+            try:
+                s = sa_json_raw.strip()
+                if not s.startswith("{"): s = "{" + s
+                if not s.endswith("}"): s = s + "}"
+                
+                try:
+                    sa_info = json.loads(s, strict=False)
+                except Exception:
+                    sa_info = json.loads(s.replace("\r", ""), strict=False)
+                    
+                if "type" not in sa_info:
+                    sa_info["type"] = "service_account"
+                    
+                if "private_key" in sa_info and "\\n" in sa_info["private_key"]:
+                    sa_info["private_key"] = sa_info["private_key"].replace("\\n", "\n")
+                    
+                creds = service_account.Credentials.from_service_account_info(
+                    sa_info, scopes=['https://www.googleapis.com/auth/drive']
+                )
+                gdrive_service = build('drive', 'v3', credentials=creds)
+                logger.info("✅ Đã kết nối Google Drive API thành công qua Service Account JSON!")
+            except Exception as err_json:
+                logger.error(f"🔴 Lỗi phân tích GDRIVE_SERVICE_ACCOUNT_JSON: {err_json}")
+                
+        if not gdrive_service:
+            target_path = None
+            if os.path.exists(sa_path): target_path = sa_path
+            elif os.path.exists(render_secret_path): target_path = render_secret_path
+            elif os.path.exists(SERVICE_ACCOUNT_FILE): target_path = SERVICE_ACCOUNT_FILE
+                
+            if target_path:
+                creds = service_account.Credentials.from_service_account_file(
+                    target_path, scopes=['https://www.googleapis.com/auth/drive']
+                )
+                gdrive_service = build('drive', 'v3', credentials=creds)
+                logger.info(f"✅ Đã kết nối thành công Google Drive API qua file: {target_path}")
+            else:
+                logger.info(f"ℹ️ Chưa cấu hình Service Account. Video sẽ được lưu tạm tại data/douyin_funny_output/")
 except Exception as e:
     logger.warning(f"⚠️ Chưa khởi tạo được Google Drive API: {e}")
 
@@ -131,6 +179,25 @@ def send_telegram_message(text, reply_markup=None):
             pass
     except Exception as e:
         logger.error(f"🔴 Lỗi gửi Telegram: {e}")
+
+def send_telegram_video(video_path, caption):
+    """Gửi trực tiếp video MP4 vào khung chat Telegram để bạn xem và lưu về điện thoại ngay"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not os.path.exists(video_path):
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+    try:
+        with open(video_path, 'rb') as video_file:
+            files = {'video': video_file}
+            data = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'caption': caption[:1024],
+                'parse_mode': 'HTML'
+            }
+            r = requests.post(url, data=data, files=files, timeout=60)
+            return r.status_code == 200
+    except Exception as e:
+        logger.error(f"🔴 Lỗi gửi video Telegram: {e}")
+        return False
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
@@ -557,6 +624,9 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
     # 4. Gửi kết quả hoàn chỉnh về Telegram
     caption = generate_funny_vietnamese_caption(title)
     
+    # Gửi trực tiếp file video MP4 vào khung chat Telegram để bạn xem & lưu ngay về máy
+    send_telegram_video(target_upload_file, caption)
+    
     if drive_link:
         success_msg = (
             f"🎉 <b>[VIDEO HÀI HƯỚC ĐÃ LƯU VÀO GOOGLE DRIVE 5TB]</b>\n\n"
@@ -569,11 +639,11 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
         )
     else:
         success_msg = (
-            f"🎉 <b>[VIDEO HÀI HƯỚC ĐÃ XỬ LÝ XONG]</b>\n\n"
+            f"🎉 <b>[VIDEO HÀI HƯỚC ĐÃ SẴN SÀNG]</b>\n\n"
             f"{caption}\n\n"
             f"─────────────────────────\n"
-            f"💾 <b>Video đã lưu cục bộ tại:</b> <code>{target_upload_file}</code>\n\n"
-            f"💡 <i>Mẹo: Hãy thêm file <code>service_account.json</code> vào thư mục bot để tự động đẩy thẳng lên Google Drive 5TB!</i>"
+            f"🎬 <b>File video MP4 đã được gửi trực tiếp ở trên</b> (Bấm lưu vào máy hoặc đăng ngay).\n\n"
+            f"💡 <i>Ghi chú: Để đẩy thẳng vào Google Drive 5TB mà không bị Google giới hạn bộ nhớ Service Account, hãy dùng Bộ nhớ dùng chung (Shared Drive) hoặc OAuth 2.0.</i>"
         )
         
     send_telegram_message(success_msg)
