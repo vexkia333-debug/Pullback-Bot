@@ -430,13 +430,7 @@ def scout_trending_funny_videos(limit=5):
         'quiet': True,
         'skip_download': True,
         'ffmpeg_location': ffmpeg_exe,
-        'playlist_items': '1-8',
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios'],
-                'player_skip': ['webpage', 'configs']
-            }
-        }
+        'playlist_items': '1-8'
     }
     
     db = load_processed_db()
@@ -503,13 +497,7 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
             'ffmpeg_location': ffmpeg_exe,
             'quiet': True,
-            'noplaylist': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios'],
-                    'player_skip': ['webpage', 'configs']
-                }
-            }
+            'noplaylist': True
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
