@@ -56,6 +56,7 @@ PORT = int(os.environ.get("PORT", 8080))
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 SERVICE_ACCOUNT_FILE = os.environ.get("GDRIVE_SERVICE_ACCOUNT_FILE", "service_account.json")
 AUTO_SCOUT_INTERVAL_HOURS = float(os.environ.get("AUTO_SCOUT_INTERVAL_HOURS", 6))  # Mặc định cứ 6 tiếng tự quét 1 lần
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "douyin_funny_output")
@@ -230,7 +231,8 @@ def upload_to_google_drive(file_path, file_name=None):
         file = gdrive_service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id, webViewLink, webContentLink'
+            fields='id, webViewLink, webContentLink',
+            supportsAllDrives=True
         ).execute()
         
         file_id = file.get('id')
@@ -239,7 +241,8 @@ def upload_to_google_drive(file_path, file_name=None):
         try:
             gdrive_service.permissions().create(
                 fileId=file_id,
-                body={'type': 'anyone', 'role': 'reader'}
+                body={'type': 'anyone', 'role': 'reader'},
+                supportsAllDrives=True
             ).execute()
         except Exception:
             pass
@@ -250,52 +253,107 @@ def upload_to_google_drive(file_path, file_name=None):
         return None
 
 def generate_funny_vietnamese_caption(original_title):
-    """Tạo tiêu đề và hashtag tiếng Việt hài hước bắt trend cho video"""
-    hashtags = "#haihuoc #cuoivobung #videohai #xuhuong #douyin #funny #haihuocvietnam #giaitri #shorts #reels"
-    
+    """Tạo tiêu đề và hashtag tiếng Việt hài hước bắt trend cho video (kết hợp Gemini AI)"""
+    clean_title = re.sub(r'#\S+', '', original_title).strip()
+    if not clean_title:
+        clean_title = "Tiểu phẩm hài hước triệu view"
+        
+    # 1. Nếu có cấu hình GEMINI_API_KEY, sử dụng Gemini AI sáng tạo bài viết triệu view
+    if GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            prompt_instruction = f"""
+Bạn là chuyên gia sáng tạo nội dung triệu view hàng đầu trên TikTok và Facebook Reels tại Việt Nam.
+Tôi có một video ngắn hài hước với nội dung gốc: "{clean_title}"
+
+Hãy viết caption đăng TikTok cực kỳ cuốn hút, dí dỏm theo đúng định dạng sau:
+🎭 [Một câu giật tít siêu hài hước, gây cười tò mò hoặc tranh luận, dưới 15 chữ, kèm icon 🤣/😂/🙈]
+
+📝 [1 câu bình luận dí dỏm, tếu táo theo phong cách Gen Z/mạng xã hội Việt Nam]
+
+👉 [1 câu kêu gọi tương tác tự nhiên, ví dụ: Tag đứa bạn hay làm trò này vào, Xem đi xem lại vẫn không nhịn được cười...]
+
+🏷️ <code>#haihuoc #cuoivobung #douyin #funny #xuhuong #videohai #haihuocvietnam #giaitri #reels #shorts</code>
+
+Lưu ý: Chỉ trả về nội dung theo khung trên, không thêm lời chào hay giải thích gì khác.
+"""
+            payload = {
+                "contents": [{"parts": [{"text": prompt_instruction}]}],
+                "generationConfig": {"temperature": 0.9, "maxOutputTokens": 350}
+            }
+            r = requests.post(url, json=payload, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts and parts[0].get("text"):
+                        gemini_caption = parts[0].get("text").strip()
+                        logger.info("✨ Đã tạo caption triệu view bằng Google Gemini AI thành công!")
+                        return gemini_caption
+        except Exception as e:
+            logger.warning(f"⚠️ Không thể gọi Gemini API ({e}), chuyển sang kho prompt dự phòng.")
+
+    # 2. Kho prompt dự phòng phong phú và chất lượng cao (20+ phong cách hài hước khác nhau)
     prompts = [
         "Xem đi xem lại vẫn không nhịn được cười với quả pha xử lý này! 😂",
         "Đúng là nhân tài ẩn dật, xem mà cười xỉu ngang! 🤣",
         "Cái kết bất ngờ không thể đoán trước được luôn á! 😆",
         "Pha này thì hết nước chấm, ai mà đỡ cho nổi! 🙈",
         "Đang buồn xem xong tỉnh cả ngủ, đúng là chúa hề! 😹",
-        "Tình huống khó đỡ nhất quả đất, không nhịn được cười! 🤣"
+        "Tình huống khó đỡ nhất quả đất, cười rớt hàm! 🤣",
+        "Người bình thường không ai làm thế này cả, hề hước thật sự! 🤪",
+        "Không biết nên khóc hay nên cười với pha tấu hài này nữa! 😭😂",
+        "Khi bạn cố gắng tỏ ra ngầu và cái kết đi vào lòng đất! 💀",
+        "Bảo sao video này triệu view, xem đoạn cuối cười ná thở! 🤣",
+        "Cười ẻ với độ lầy lội của mấy thánh này! 🙈",
+        "Pha xử lý mang tính sát thương cực cao cho cơ bụng! 😆",
+        "Đỉnh cao của sự vụng về nhưng lại vô cùng đáng yêu! 🥰😂",
+        "Xem xong tự nhiên thấy yêu đời hẳn ra, đúng là cao thủ troll! 🎭",
+        "Ai bày cho quả trò này vậy trời, cười không nhặt được mồm! 😹",
+        "Pha xử lý cồng kềnh nhất lịch sử nhân loại! 🤦‍♂️😂",
+        "Tưởng thế nào, hóa ra cũng chỉ đến thế thôi à! 🤣",
+        "Được phen cười bể bụng với các idol tóp tóp! 🎬",
+        "Cuộc sống mà, đôi khi phải có những cú twist như này mới vui! ✨",
+        "Xem clip này nhớ tag ngay đứa bạn thân có nết y hệt vào nhé! 🎯"
     ]
     selected_prompt = random.choice(prompts)
+    hashtags = "#haihuoc #cuoivobung #videohai #xuhuong #douyin #funny #haihuocvietnam #giaitri #shorts #reels"
     
-    clean_title = re.sub(r'#\S+', '', original_title).strip()
-    if not clean_title:
-        clean_title = "Tiểu phẩm hài hước triệu view"
-        
     caption = (
         f"🎭 <b>{selected_prompt}</b>\n\n"
         f"📝 <i>Nội dung:</i> {clean_title[:90]}\n\n"
+        f"👉 <i>Xem đi xem lại vẫn thấy hài, tag đứa bạn lầy lội vào đây nhé!</i>\n\n"
         f"🏷️ <b>Hashtag chuẩn SEO:</b>\n<code>{hashtags}</code>"
     )
     return caption
 
-# Danh sách từ khóa tìm kiếm video hài hước triệu view
+# Danh sách từ khóa tìm kiếm video hài hước triệu view cập nhật xu hướng mới nhất
 SCOUT_KEYWORDS = [
-    "douyin funny clips #shorts",
-    "tiểu phẩm hài douyin triệu view #shorts",
-    "clip hài hước vui nhộn khó đỡ #shorts",
-    "funny animals comedy moments #shorts",
-    "viral funny clips try not to laugh #shorts",
+    "douyin funny clips 2026 #shorts",
+    "tiểu phẩm hài douyin mới nhất #shorts",
+    "clip hài hước triệu view mới nhất #shorts",
+    "funny viral clips try not to laugh 2026 #shorts",
     "troll hài hước douyin cười bể bụng #shorts",
-    "những pha xử lý đi vào lòng đất #shorts"
+    "những pha xử lý đi vào lòng đất mới nhất #shorts",
+    "funny pet animals comedy #shorts",
+    "douyin comedy viral moments #shorts",
+    "clip hài hước lầy lội triệu view #shorts"
 ]
 
 def scout_trending_funny_videos(limit=5):
-    """Tự động tìm kiếm các video hài hước hot xu hướng chưa từng xử lý"""
+    """Tự động tìm kiếm các video hài hước hot xu hướng mới nhất chưa từng xử lý"""
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = {
         'extract_flat': True,
         'quiet': True,
         'skip_download': True,
         'ffmpeg_location': ffmpeg_exe,
+        'playlist_items': '1-8',
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb']
+                'player_client': ['android', 'ios'],
+                'player_skip': ['webpage', 'configs']
             }
         }
     }
@@ -309,10 +367,19 @@ def scout_trending_funny_videos(limit=5):
     
     for kw in chosen_keywords:
         try:
-            search_query = f"ytsearch6:{kw}"
+            # Tìm kiếm video mới tải lên gần đây (sp=CAISAhAB) để đảm bảo video luôn mới nhất và bắt trend
+            encoded_kw = urllib.parse.quote_plus(kw)
+            search_url = f"https://www.youtube.com/results?search_query={encoded_kw}&sp=CAISAhAB"
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                res = ydl.extract_info(search_query, download=False)
+                res = ydl.extract_info(search_url, download=False)
                 entries = res.get('entries', [])
+                
+                # Dự phòng: nếu tìm kiếm theo ngày không có thì tìm kiếm từ khóa thông thường
+                if not entries:
+                    res = ydl.extract_info(f"ytsearch6:{kw}", download=False)
+                    entries = res.get('entries', [])
+                    
                 for e in entries:
                     v_id = e.get('id')
                     dur = e.get('duration')
@@ -321,7 +388,7 @@ def scout_trending_funny_videos(limit=5):
                         candidates.append({
                             "id": v_id,
                             "title": e.get('title', 'Video Hài Hước'),
-                            "url": e.get('url') or f"https://www.youtube.com/watch?v={v_id}",
+                            "url": f"https://www.youtube.com/watch?v={v_id}",
                             "duration": dur
                         })
         except Exception as e:
@@ -342,16 +409,17 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
         f"⏳ <i>Đang tự động tải về và xử lý lách bản quyền...</i>"
     )
     
-    # 1. Tải video (Dùng player_client android/ios để tránh 429 trên Cloud/Render)
+    # 1. Tải video (Bỏ qua webpage để triệt tiêu 100% mã lỗi 429 trên Cloud/Render)
     ydl_opts = {
         'outtmpl': raw_file,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
         'ffmpeg_location': ffmpeg_exe,
         'quiet': True,
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb']
+                'player_client': ['android', 'ios'],
+                'player_skip': ['webpage', 'configs']
             }
         }
     }
