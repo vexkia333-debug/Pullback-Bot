@@ -57,6 +57,7 @@ GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 SERVICE_ACCOUNT_FILE = os.environ.get("GDRIVE_SERVICE_ACCOUNT_FILE", "service_account.json")
 AUTO_SCOUT_INTERVAL_HOURS = float(os.environ.get("AUTO_SCOUT_INTERVAL_HOURS", 6))  # Mặc định cứ 6 tiếng tự quét 1 lần
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "douyin_funny_output")
@@ -211,6 +212,23 @@ def process_video_anti_detection(input_path, output_path):
         except Exception:
             return False
 
+def download_video_file(url, out_path):
+    """Tải file video trực tiếp từ CDN máy chủ TikTok/Douyin (không watermark)"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        'Referer': 'https://www.tiktok.com/'
+    }
+    try:
+        r = requests.get(url, headers=headers, stream=True, timeout=30)
+        if r.status_code == 200:
+            with open(out_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=1024*1024):
+                    if chunk: f.write(chunk)
+            return True
+    except Exception as e:
+        logger.error(f"🔴 Lỗi tải file video từ CDN: {e}")
+    return False
+
 def upload_to_google_drive(file_path, file_name=None):
     """Tải thẳng video lên Google Drive 5TB và cấp quyền xem công khai"""
     global gdrive_service
@@ -341,8 +359,71 @@ SCOUT_KEYWORDS = [
     "clip hài hước lầy lội triệu view #shorts"
 ]
 
+def scout_tiktok_douyin_via_rapidapi(limit=5):
+    """Sử dụng TokApi trên RapidAPI để săn video hài hước triệu view trực tiếp từ TikTok/Douyin"""
+    if not RAPIDAPI_KEY:
+        return []
+        
+    keywords = ["hai huoc douyin", "tieu pham hai", "funny comedy", "hai huoc tiktok", "chua he"]
+    chosen_kw = random.choice(keywords)
+    logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{chosen_kw}'...")
+    
+    url = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/video"
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": "tokapi-mobile-version.p.rapidapi.com"
+    }
+    params = {
+        "keyword": chosen_kw,
+        "count": 10
+    }
+    
+    db = load_processed_db()
+    processed_ids = set(db.get("videos", []))
+    candidates = []
+    
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            aweme_list = data.get("aweme_list", []) or data.get("data", []) or []
+            for item in aweme_list:
+                v_id = str(item.get("aweme_id") or item.get("id") or "")
+                if not v_id or v_id in processed_ids:
+                    continue
+                    
+                title = item.get("desc") or "Video Hài Hước TikTok Douyin"
+                play_addr = item.get("video", {}).get("play_addr", {})
+                url_list = play_addr.get("url_list", [])
+                if not url_list:
+                    download_addr = item.get("video", {}).get("download_addr", {})
+                    url_list = download_addr.get("url_list", [])
+                    
+                if url_list:
+                    candidates.append({
+                        "id": v_id,
+                        "title": title,
+                        "url": url_list[0],
+                        "is_direct_cdn": True,
+                        "duration": 30
+                    })
+            logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin mới không watermark!")
+        else:
+            logger.warning(f"⚠️ RapidAPI status: {r.status_code} - {r.text[:150]}")
+    except Exception as e:
+        logger.error(f"🔴 Lỗi gọi RapidAPI: {e}")
+        
+    return candidates
+
 def scout_trending_funny_videos(limit=5):
     """Tự động tìm kiếm các video hài hước hot xu hướng mới nhất chưa từng xử lý"""
+    # 1. ƯU TIÊN HÀNG ĐẦU: Quét trực tiếp TikTok/Douyin qua RapidAPI TokApi nếu có RAPIDAPI_KEY
+    if RAPIDAPI_KEY:
+        rapid_candidates = scout_tiktok_douyin_via_rapidapi(limit)
+        if rapid_candidates:
+            return rapid_candidates
+            
+    # 2. DỰ PHÒNG: Quét YouTube Shorts nếu chưa cấu hình RAPIDAPI_KEY
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = {
         'extract_flat': True,
@@ -396,7 +477,7 @@ def scout_trending_funny_videos(limit=5):
             
     return candidates
 
-def download_and_process_video(video_url, video_id, title, source_desc="Tự động quét xu hướng"):
+def download_and_process_video(video_url, video_id, title, source_desc="Tự động quét xu hướng", is_direct_cdn=False):
     """Thực thi chuỗi xử lý: Tải -> FFmpeg Lách Bản Quyền -> Đẩy Drive 5TB -> Gửi Telegram"""
     raw_file = os.path.join(DOWNLOAD_DIR, f"raw_{video_id}.mp4")
     clean_file = os.path.join(DOWNLOAD_DIR, f"clean_{video_id}.mp4")
@@ -409,28 +490,34 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
         f"⏳ <i>Đang tự động tải về và xử lý lách bản quyền...</i>"
     )
     
-    # 1. Tải video (Bỏ qua webpage để triệt tiêu 100% mã lỗi 429 trên Cloud/Render)
-    ydl_opts = {
-        'outtmpl': raw_file,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
-        'ffmpeg_location': ffmpeg_exe,
-        'quiet': True,
-        'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios'],
-                'player_skip': ['webpage', 'configs']
+    # 1. Tải video (Ưu tiên tải thẳng từ CDN TikTok/Douyin nếu có link trực tiếp)
+    if is_direct_cdn or (".mp4" in video_url and "youtube" not in video_url) or "byteoversea" in video_url or "tiktokcdn" in video_url:
+        logger.info("📥 Đang tải trực tiếp từ CDN máy chủ TikTok/Douyin...")
+        if not download_video_file(video_url, raw_file):
+            logger.error(f"🔴 Lỗi tải video từ CDN: {video_url}")
+            return False
+    else:
+        # Tải qua yt-dlp (Bỏ qua webpage để tránh 429/403)
+        ydl_opts = {
+            'outtmpl': raw_file,
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+            'ffmpeg_location': ffmpeg_exe,
+            'quiet': True,
+            'noplaylist': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios'],
+                    'player_skip': ['webpage', 'configs']
+                }
             }
         }
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
-    except Exception as e:
-        logger.error(f"🔴 Lỗi tải video {video_url}: {e}")
-        send_telegram_message(f"⚠️ Lỗi tải video {video_id}: {e}")
-        return False
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+        except Exception as e:
+            logger.error(f"🔴 Lỗi tải video {video_url}: {e}")
+            send_telegram_message(f"⚠️ Lỗi tải video {video_id}: {e}")
+            return False
 
     if not os.path.exists(raw_file) or os.path.getsize(raw_file) == 0:
         send_telegram_message(f"⚠️ File tải về rỗng: {video_id}")
@@ -501,7 +588,8 @@ def execute_auto_scout_job():
         
     for target in candidates[:3]:
         logger.info(f"🎯 Đang thử tải video hot: {target['id']} - {target['title']}")
-        success = download_and_process_video(target['url'], target['id'], target['title'], "Hệ thống tự động săn xu hướng")
+        is_direct_cdn = target.get("is_direct_cdn", False)
+        success = download_and_process_video(target['url'], target['id'], target['title'], "Hệ thống tự động săn xu hướng", is_direct_cdn=is_direct_cdn)
         if success:
             return True
         logger.warning(f"⚠️ Video {target['id']} không thể tải, thử video tiếp theo...")
