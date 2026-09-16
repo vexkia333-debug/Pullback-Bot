@@ -433,6 +433,80 @@ Lưu ý: Chỉ trả về nội dung theo khung trên, không thêm lời chào 
     )
     return caption
 
+# Danh sách từ khóa cấm triệt để: gái xinh/tiệm tóc, bất động sản/nhà đẹp, xe sang, nấu ăn, triết lý, máy bay...
+BLACKLIST_WORDS = [
+    "soup", "recipe", "cook", "food", "kitchen", "bake",
+    "motivation", "destination", "inspiration", "mindset", "success", "mysterious",
+    "crypto", "bitcoin", "trading", "invest", "forex",
+    "lamborghini", "ferrari", "supercar", "carspotting", "aventador", "maserati", "porsche",
+    "peanuts", "snoopy", "charlie brown", "cartoon", "anime", "animation",
+    "reflexionesprofundas", "amorproprio", "verdadesincomodas",
+    "haircut", "hairstyle", "salon", "makeup", "beauty", "cosmetic",
+    "real estate", "realtor", "house tour", "mansion", "architecture",
+    "airplane", "flight", "boarding", "aesthetic"
+]
+
+# Từ khóa nhận diện nội dung bắt buộc phải là hài hước (bao gồm cả emoji cười)
+HUMOR_SIGNALS = [
+    "funny", "comedy", "lol", "joke", "prank", "laugh", "lmao", "fail",
+    "troll", "humor", "hài", "tiểu phẩm", "cười", "bựa", "douyin", "chúa hề",
+    "tấu hài", "bể bụng", "khó đỡ", "đi vào lòng đất", "lầy", "搞笑", "沙雕", "爆笑", "喜剧", "meme",
+    "🤣", "😂", "😆", "😹", "comedyclub", "funniest"
+]
+
+def gemini_verify_comedy_content(title, desc=""):
+    """
+    Sử dụng Google Gemini AI để thẩm định nội dung video 100% chuẩn Hài Hước / Tiểu Phẩm Triệu View.
+    Loại bỏ triệt để: Gái xinh làm tóc/làm đẹp, khoe xe, bất động sản, triết lý sống, nấu ăn,...
+    """
+    clean_text = f"{title} {desc}".strip()
+    lower = clean_text.lower()
+    
+    # 1. Kiểm tra nhanh bằng Blacklist trước (tiết kiệm quota API)
+    if any(b in lower for b in BLACKLIST_WORDS):
+        return False, "Dính từ khóa cấm trong Blacklist (gái xinh/xe sang/nhà đẹp/triết lý)"
+        
+    # 2. Thẩm định chuyên sâu bằng Gemini AI nếu có cấu hình GEMINI_API_KEY
+    if GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            prompt = f"""
+Bạn là chuyên gia thẩm định nội dung cho một kênh chuyên video HÀI HƯỚC TRIỆU VIEW trên TikTok/Reels Việt Nam.
+Hãy phân tích tiêu đề và mô tả video sau:
+Tiêu đề/Nội dung: "{clean_text}"
+
+QUY TẮC PHÂN LOẠI CỰC KỲ NGHIÊM NGẶT:
+- ĐẠT CHUẨN (is_comedy = true): Video phải là tiểu phẩm hài, tình huống troll/chơi khăm (prank), pha xử lý cồng kềnh/đi vào lòng đất, tai nạn hài hước (funny fail), động vật tấu hài, meme giải trí gây cười.
+- KHÔNG ĐẠT (is_comedy = false): Bất kỳ video nào về làm đẹp, tiệm tóc/salon, gái xinh pose dáng, bất động sản/nhà đẹp, khoe siêu xe, nấu ăn/công thức món, phong cảnh/cửa sổ máy bay kèm câu nói triết lý/đạo lý/tâm trạng, tin tức, tài chính.
+
+Trả về DUY NHẤT một chuỗi JSON hợp lệ với định dạng:
+{{"is_comedy": true, "reason": "Tiểu phẩm hài hước"}} hoặc {{"is_comedy": false, "reason": "Video làm tóc salon"}}
+"""
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "response_mime_type": "application/json"
+                }
+            }
+            r = requests.post(url, json=payload, timeout=7)
+            if r.status_code == 200:
+                res_data = r.json()
+                candidates = res_data.get("candidates", [])
+                if candidates:
+                    text_out = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    data = json.loads(text_out)
+                    is_comedy = data.get("is_comedy", False)
+                    reason = data.get("reason", "")
+                    return is_comedy, reason
+        except Exception as e:
+            logger.warning(f"⚠️ Lỗi gọi Gemini AI thẩm định: {e}")
+            
+    # 3. Fallback theo tín hiệu từ khóa nếu chưa cấu hình Gemini hoặc API timeout
+    if any(h in lower for h in HUMOR_SIGNALS):
+        return True, "Khớp tín hiệu từ khóa hài hước (Heuristic)"
+    return False, "Không phát hiện yếu tố hài hước (Heuristic)"
+
 # Danh sách từ khóa tìm kiếm video hài hước triệu view cập nhật xu hướng mới nhất
 SCOUT_KEYWORDS = [
     "douyin funny clips 2026 #shorts",
@@ -476,27 +550,6 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     
     url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
     
-    # Danh sách từ khóa cấm triệt để: gái xinh/tiệm tóc, bất động sản/nhà đẹp, xe sang, nấu ăn, triết lý, máy bay...
-    BLACKLIST_WORDS = [
-        "soup", "recipe", "cook", "food", "kitchen", "bake",
-        "motivation", "destination", "inspiration", "mindset", "success", "mysterious",
-        "crypto", "bitcoin", "trading", "invest", "forex",
-        "lamborghini", "ferrari", "supercar", "carspotting", "aventador", "maserati", "porsche",
-        "peanuts", "snoopy", "charlie brown", "cartoon", "anime", "animation",
-        "reflexionesprofundas", "amorproprio", "verdadesincomodas",
-        "haircut", "hairstyle", "salon", "makeup", "beauty", "cosmetic",
-        "real estate", "realtor", "house tour", "mansion", "architecture",
-        "airplane", "flight", "boarding", "aesthetic"
-    ]
-    
-    # Từ khóa nhận diện nội dung bắt buộc phải là hài hước (bao gồm cả emoji cười)
-    HUMOR_SIGNALS = [
-        "funny", "comedy", "lol", "joke", "prank", "laugh", "lmao", "fail",
-        "troll", "humor", "hài", "tiểu phẩm", "cười", "bựa", "douyin", "chúa hề",
-        "tấu hài", "bể bụng", "khó đỡ", "đi vào lòng đất", "lầy", "搞笑", "沙雕", "爆笑", "喜剧", "meme",
-        "🤣", "😂", "😆", "😹", "comedyclub", "funniest"
-    ]
-    
     for kw in search_queries:
         if len(candidates) >= limit:
             break
@@ -514,6 +567,8 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
                     aweme_list = data.get("aweme_list", []) or data.get("data", []) or data.get("items", []) or []
                     if aweme_list:
                         break
+                else:
+                    logger.warning(f"⚠️ TokApi HTTP {r.status_code} ({kw}): {r.text[:80]}")
             except Exception as e:
                 logger.warning(f"⚠️ Lỗi gọi TokApi /v1/search/post (kw={kw}, sort={sort_t}): {e}")
                 
@@ -530,18 +585,14 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
                 continue
                 
             title = item.get("desc") or "Video Hài Hước TikTok Douyin"
-            lower_title = title.lower()
             
-            # 2. Bỏ qua nếu tiêu đề chứa từ khóa rác ngoài chủ đề hài
-            if any(b in lower_title for b in BLACKLIST_WORDS):
-                logger.info(f"⏩ Bỏ qua video ngoài chủ đề hài: {title[:45]}...")
+            # 2. Thẩm định bằng Gemini AI để đảm bảo 100% tính ĐỒNG NHẤT
+            is_comedy, reason = gemini_verify_comedy_content(title)
+            if not is_comedy:
+                logger.info(f"⏩ [Gemini AI Loại bỏ] {title[:40]}... (Lý do: {reason})")
                 continue
-                
-            # 3. Đảm bảo tính ĐỒNG NHẤT: Tiêu đề hoặc hashtag phải có dấu hiệu hài hước
-            has_humor = any(h in lower_title for h in HUMOR_SIGNALS)
-            if not has_humor:
-                logger.info(f"⏩ Bỏ qua video không có yếu tố hài hước: {title[:45]}...")
-                continue
+            else:
+                logger.info(f"✨ [Gemini AI Phê duyệt] {title[:40]}... (Lý do: {reason})")
                 
             video_info = item.get("video", {})
             w = video_info.get("width", 0)
@@ -552,12 +603,12 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
             if dur > 1000:
                 dur = dur / 1000.0
                 
-            # 4. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height >= Width)
+            # 3. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height >= Width)
             if w > 0 and h > 0 and h < w:
                 logger.info(f"⏩ Bỏ qua video ngang ({w}x{h}): {title[:40]}...")
                 continue
                 
-            # 5. Lọc thời lượng chuẩn tiểu phẩm/hài kịch (từ 10 giây đến 90 giây)
+            # 4. Lọc thời lượng chuẩn tiểu phẩm/hài kịch (từ 10 giây đến 90 giây)
             if dur > 0 and (dur < 10 or dur > 90):
                 logger.info(f"⏩ Bỏ qua video thời lượng không phù hợp ({dur:.1f}s): {title[:40]}...")
                 continue
@@ -594,49 +645,54 @@ def scout_trending_funny_videos(limit=5):
         if rapid_candidates:
             return rapid_candidates
             
-    # 2. DỰ PHÒNG: Quét YouTube Shorts nếu chưa cấu hình RAPIDAPI_KEY
+    # 2. DỰ PHÒNG: Quét YouTube Shorts nếu chưa cấu hình RAPIDAPI_KEY hoặc TokApi hết hạn
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = {
         'extract_flat': True,
         'quiet': True,
         'skip_download': True,
         'ffmpeg_location': ffmpeg_exe,
-        'playlist_items': '1-8'
+        'playlist_items': '1-8',
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}}
     }
     
     db = load_processed_db()
     processed_ids = set(db.get("videos", []))
     
-    # Chọn ngẫu nhiên 2 từ khóa để làm mới nội dung mỗi lần quét
-    chosen_keywords = random.sample(SCOUT_KEYWORDS, 2)
+    # Chọn ngẫu nhiên 3 từ khóa để quét sâu
+    chosen_keywords = random.sample(SCOUT_KEYWORDS, min(3, len(SCOUT_KEYWORDS)))
     candidates = []
     
     for kw in chosen_keywords:
         try:
-            # Tìm kiếm video mới tải lên gần đây (sp=CAISAhAB) để đảm bảo video luôn mới nhất và bắt trend
-            encoded_kw = urllib.parse.quote_plus(kw)
-            search_url = f"https://www.youtube.com/results?search_query={encoded_kw}&sp=CAISAhAB"
-            
+            logger.info(f"🔍 [Kênh Phụ Shorts] Đang quét: '{kw}'...")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                res = ydl.extract_info(search_url, download=False)
+                res = ydl.extract_info(f"ytsearch25:{kw}", download=False)
                 entries = res.get('entries', [])
                 
-                # Dự phòng: nếu tìm kiếm theo ngày không có thì tìm kiếm từ khóa thông thường
-                if not entries:
-                    res = ydl.extract_info(f"ytsearch6:{kw}", download=False)
-                    entries = res.get('entries', [])
+            for e in entries:
+                v_id = e.get('id')
+                dur = e.get('duration')
+                title = e.get('title', 'Video Hài Hước')
+                
+                # Chỉ lấy video ngắn chuẩn TikTok/Shorts (từ 10 đến 75 giây)
+                if v_id and v_id not in processed_ids and dur and (10 <= dur <= 75):
+                    # Thẩm định bằng Gemini AI để đảm bảo 100% tính ĐỒNG NHẤT
+                    is_comedy, reason = gemini_verify_comedy_content(title)
+                    if not is_comedy:
+                        continue
+                    logger.info(f"✨ [Đạt chuẩn Hài] {title[:45]}... ({dur}s - {reason})")
                     
-                for e in entries:
-                    v_id = e.get('id')
-                    dur = e.get('duration')
-                    # Chỉ lấy video ngắn chuẩn TikTok/Shorts (dưới 65 giây)
-                    if v_id and v_id not in processed_ids and (dur is None or dur <= 65):
-                        candidates.append({
-                            "id": v_id,
-                            "title": e.get('title', 'Video Hài Hước'),
-                            "url": f"https://www.youtube.com/watch?v={v_id}",
-                            "duration": dur
-                        })
+                    candidates.append({
+                        "id": v_id,
+                        "title": title,
+                        "url": f"https://www.youtube.com/watch?v={v_id}",
+                        "duration": dur
+                    })
+                    if len(candidates) >= limit:
+                        break
+            if len(candidates) >= limit:
+                break
         except Exception as e:
             logger.error(f"🔴 Lỗi khi quét từ khóa '{kw}': {e}")
             
@@ -662,13 +718,14 @@ def download_and_process_video(video_url, video_id, title, source_desc="Tự đ�
             logger.error(f"🔴 Lỗi tải video từ CDN: {video_url}")
             return False
     else:
-        # Tải qua yt-dlp (Bỏ qua webpage để tránh 429/403)
+        # Tải qua yt-dlp với cơ chế vượt xác thực bot
         ydl_opts = {
             'outtmpl': raw_file,
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
             'ffmpeg_location': ffmpeg_exe,
             'quiet': True,
-            'noplaylist': True
+            'noplaylist': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}}
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
