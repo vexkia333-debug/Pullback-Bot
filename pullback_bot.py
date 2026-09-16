@@ -241,32 +241,52 @@ def start_health_check_server():
 def process_video_anti_detection(input_path, output_path):
     """
     Sử dụng FFmpeg để:
-    1. Tăng tốc độ 1.03x (Lách so khớp âm thanh & khung hình)
-    2. Zoom nhẹ 1.02x
-    3. Xóa sạch metadata cũ (-map_metadata -1)
+    1. Tự động kiểm tra luồng video/audio hợp lệ
+    2. Tăng tốc độ 1.03x (Lách so khớp âm thanh & khung hình)
+    3. Zoom nhẹ 1.02x
+    4. Xóa sạch metadata cũ (-map_metadata -1)
     """
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        cmd = [
-            ffmpeg_exe, "-y",
-            "-i", input_path,
-            "-filter_complex", "[0:v]setpts=PTS/1.03,scale=trunc(iw*1.02/2)*2:trunc(ih*1.02/2)*2[v];[0:a]atempo=1.03[a]",
-            "-map", "[v]",
-            "-map", "[a]",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "24",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-map_metadata", "-1",
-            output_path
-        ]
+        probe = subprocess.run([ffmpeg_exe, "-i", input_path], capture_output=True, text=True)
+        has_video = "Video:" in probe.stderr
+        has_audio = "Audio:" in probe.stderr
+        
+        if not has_video:
+            logger.warning(f"⚠️ File tải về không chứa luồng Video hợp lệ (có thể là bài đăng ảnh/âm thanh)")
+            return False
+            
+        cmd = [ffmpeg_exe, "-y", "-i", input_path]
+        
+        if has_video and has_audio:
+            cmd += [
+                "-filter_complex", "[0:v]setpts=PTS/1.03,scale=trunc(iw*1.02/2)*2:trunc(ih*1.02/2)*2[v];[0:a]atempo=1.03[a]",
+                "-map", "[v]",
+                "-map", "[a]",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "24",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-map_metadata", "-1",
+                output_path
+            ]
+        else:
+            # Video không có âm thanh (silent video)
+            cmd += [
+                "-vf", "setpts=PTS/1.03,scale=trunc(iw*1.02/2)*2:trunc(ih*1.02/2)*2",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "24",
+                "-map_metadata", "-1",
+                output_path
+            ]
+            
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             return True
         else:
-            logger.warning(f"⚠️ FFmpeg filter warning: {res.stderr[-300:] if res.stderr else 'unknown'}")
-            # Dự phòng: Sao chép nếu filter lỗi
+            logger.warning(f"⚠️ FFmpeg filter warning, fallback sang copy: {res.stderr[-200:] if res.stderr else 'unknown'}")
             import shutil
             shutil.copy(input_path, output_path)
             return True
@@ -486,6 +506,10 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     for item in aweme_list:
         v_id = str(item.get("aweme_id") or item.get("id") or "")
         if not v_id or v_id in processed_ids:
+            continue
+            
+        # Bỏ qua các bài đăng dạng ảnh / slideshow (không phải video clip)
+        if item.get("images") or item.get("image_post_info") or item.get("media_type") == 2:
             continue
             
         title = item.get("desc") or "Video Hài Hước TikTok Douyin"
