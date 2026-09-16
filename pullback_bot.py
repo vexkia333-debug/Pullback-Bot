@@ -451,19 +451,6 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     if not RAPIDAPI_KEY:
         return []
         
-    # Danh sách từ khóa chuyên sâu cho clip hài kịch Douyin, troll chơi khăm & tiểu phẩm triệu view
-    keywords = [
-        "tiểu phẩm hài douyin", # Tiểu phẩm hài kịch Douyin
-        "douyin funny clips",   # Douyin hài hước
-        "funny prank fail",     # Troll chơi khăm & tai nạn hài hước
-        "funny animals comedy", # Động vật tấu hài
-        "troll hài hước",       # Troll hài hước Việt & Douyin
-        "try not to laugh",     # Thử thách nhịn cười
-        "搞笑视频"              # Video hài hước Douyin
-    ]
-    chosen_kw = random.choice(keywords)
-    logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{chosen_kw}'...")
-    
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": "tokapi-mobile-version.p.rapidapi.com"
@@ -473,39 +460,22 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     processed_ids = set(db.get("videos", []))
     candidates = []
     
-    url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
-    params_post = {
-        "keyword": chosen_kw,
-        "count": 15,
-        "sort_type": "1"  # 1: Most liked (triệu view / viral nhất)
-    }
+    # Danh sách từ khóa đã được kiểm chứng đem lại kết quả phong phú trên TikTok
+    search_queries = [
+        "viral comedy",
+        "comedy skit",
+        "try not to laugh",
+        "funny comedy",
+        "funny video",
+        "funny moments",
+        "hilarious comedy",
+        "funny meme",
+        "prank funny"
+    ]
+    random.shuffle(search_queries)
     
-    aweme_list = []
-    try:
-        r = requests.get(url_post, headers=headers, params=params_post, timeout=15)
-        if r.status_code == 200 and r.text.strip():
-            try:
-                data = json.loads(r.text)
-                aweme_list = data.get("aweme_list", []) or data.get("data", []) or data.get("items", []) or []
-            except Exception as je:
-                logger.warning(f"⚠️ Không thể parse JSON từ /v1/search/post: {je}")
-        else:
-            logger.warning(f"⚠️ RapidAPI /v1/search/post status: {r.status_code} - {r.text[:150]}")
-    except Exception as e:
-        logger.error(f"🔴 Lỗi gọi RapidAPI /v1/search/post: {e}")
-        
-    # Nếu từ khóa 1 không có, thử ngay từ khóa dự phòng chuẩn hài (KHÔNG dùng feed For You tổng hợp để tránh gái xinh/nhà cửa)
-    if not aweme_list:
-        backup_kw = "funny prank fail" if chosen_kw != "funny prank fail" else "douyin funny clips"
-        try:
-            logger.info(f"🔄 Đang quét từ khóa hài dự phòng: '{backup_kw}'...")
-            r_bk = requests.get(url_post, headers=headers, params={"keyword": backup_kw, "count": 15, "sort_type": "1"}, timeout=15)
-            if r_bk.status_code == 200 and r_bk.text.strip():
-                data_bk = json.loads(r_bk.text)
-                aweme_list = data_bk.get("aweme_list", []) or data_bk.get("data", []) or data_bk.get("items", []) or []
-        except Exception as e:
-            logger.error(f"🔴 Lỗi gọi từ khóa hài dự phòng: {e}")
-            
+    url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
+    
     # Danh sách từ khóa cấm triệt để: gái xinh/tiệm tóc, bất động sản/nhà đẹp, xe sang, nấu ăn, triết lý, máy bay...
     BLACKLIST_WORDS = [
         "soup", "recipe", "cook", "food", "kitchen", "bake",
@@ -519,67 +489,96 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
         "airplane", "flight", "boarding", "aesthetic"
     ]
     
-    # Từ khóa nhận diện nội dung bắt buộc phải là hài hước
+    # Từ khóa nhận diện nội dung bắt buộc phải là hài hước (bao gồm cả emoji cười)
     HUMOR_SIGNALS = [
         "funny", "comedy", "lol", "joke", "prank", "laugh", "lmao", "fail",
         "troll", "humor", "hài", "tiểu phẩm", "cười", "bựa", "douyin", "chúa hề",
-        "tấu hài", "bể bụng", "khó đỡ", "đi vào lòng đất", "lầy", "搞笑", "沙雕", "爆笑", "喜剧", "meme"
+        "tấu hài", "bể bụng", "khó đỡ", "đi vào lòng đất", "lầy", "搞笑", "沙雕", "爆笑", "喜剧", "meme",
+        "🤣", "😂", "😆", "😹", "comedyclub", "funniest"
     ]
     
-    # Phân tích danh sách video lấy được từ TokApi
-    for item in aweme_list:
-        v_id = str(item.get("aweme_id") or item.get("id") or "")
-        if not v_id or v_id in processed_ids:
-            continue
+    for kw in search_queries:
+        if len(candidates) >= limit:
+            break
             
-        # 1. Bỏ qua các bài đăng dạng ảnh / slideshow (không phải video clip)
-        if item.get("images") or item.get("image_post_info") or item.get("media_type") == 2:
-            continue
-            
-        title = item.get("desc") or "Video Hài Hước TikTok Douyin"
-        lower_title = title.lower()
+        logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{kw}'...")
+        aweme_list = []
         
-        # 2. Bỏ qua nếu tiêu đề chứa từ khóa rác ngoài chủ đề hài
-        if any(b in lower_title for b in BLACKLIST_WORDS):
-            logger.info(f"⏩ Bỏ qua video ngoài chủ đề hài: {title[:45]}...")
+        # Thử lấy theo most liked (sort_type: 1), nếu không có thử relevance (sort_type: 0)
+        for sort_t in ["1", "0"]:
+            try:
+                params_post = {"keyword": kw, "count": 15, "sort_type": sort_t}
+                r = requests.get(url_post, headers=headers, params=params_post, timeout=15)
+                if r.status_code == 200 and r.text.strip():
+                    data = json.loads(r.text)
+                    aweme_list = data.get("aweme_list", []) or data.get("data", []) or data.get("items", []) or []
+                    if aweme_list:
+                        break
+            except Exception as e:
+                logger.warning(f"⚠️ Lỗi gọi TokApi /v1/search/post (kw={kw}, sort={sort_t}): {e}")
+                
+        if not aweme_list:
             continue
             
-        # 3. Đảm bảo tính ĐỒNG NHẤT: Tiêu đề hoặc hashtag phải có dấu hiệu hài hước
-        has_humor = any(h in lower_title for h in HUMOR_SIGNALS)
-        if not has_humor:
-            logger.info(f"⏩ Bỏ qua video không có yếu tố hài hước: {title[:45]}...")
-            continue
+        for item in aweme_list:
+            v_id = str(item.get("aweme_id") or item.get("id") or "")
+            if not v_id or v_id in processed_ids or any(c["id"] == v_id for c in candidates):
+                continue
+                
+            # 1. Bỏ qua các bài đăng dạng ảnh / slideshow (không phải video clip)
+            if item.get("images") or item.get("image_post_info") or item.get("media_type") == 2:
+                continue
+                
+            title = item.get("desc") or "Video Hài Hước TikTok Douyin"
+            lower_title = title.lower()
             
-        video_info = item.get("video", {})
-        w = video_info.get("width", 0)
-        h = video_info.get("height", 0)
-        dur = video_info.get("duration", 0)
-        
-        # 4. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height > Width)
-        if w > 0 and h > 0 and h <= w:
-            logger.info(f"⏩ Bỏ qua video ngang/vuông ({w}x{h}): {title[:40]}...")
-            continue
+            # 2. Bỏ qua nếu tiêu đề chứa từ khóa rác ngoài chủ đề hài
+            if any(b in lower_title for b in BLACKLIST_WORDS):
+                logger.info(f"⏩ Bỏ qua video ngoài chủ đề hài: {title[:45]}...")
+                continue
+                
+            # 3. Đảm bảo tính ĐỒNG NHẤT: Tiêu đề hoặc hashtag phải có dấu hiệu hài hước
+            has_humor = any(h in lower_title for h in HUMOR_SIGNALS)
+            if not has_humor:
+                logger.info(f"⏩ Bỏ qua video không có yếu tố hài hước: {title[:45]}...")
+                continue
+                
+            video_info = item.get("video", {})
+            w = video_info.get("width", 0)
+            h = video_info.get("height", 0)
+            dur = video_info.get("duration", 0)
             
-        # 5. Lọc thời lượng chuẩn tiểu phẩm/hài kịch (từ 12 giây đến 70 giây) - loại bỏ clip 5s lướt qua
-        if dur > 0 and (dur < 12 or dur > 70):
-            logger.info(f"⏩ Bỏ qua video thời lượng không phù hợp ({dur}s): {title[:40]}...")
-            continue
-            
-        play_addr = video_info.get("play_addr", {})
-        url_list = play_addr.get("url_list", [])
-        if not url_list:
-            download_addr = video_info.get("download_addr", {})
-            url_list = download_addr.get("url_list", [])
-            
-        if url_list:
-            candidates.append({
-                "id": v_id,
-                "title": title,
-                "url": url_list[0],
-                "is_direct_cdn": True,
-                "duration": dur if dur > 0 else 30
-            })
-            
+            # Chuyển đổi mili-giây sang giây nếu API trả về mili-giây (ví dụ 25000 -> 25s)
+            if dur > 1000:
+                dur = dur / 1000.0
+                
+            # 4. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height >= Width)
+            if w > 0 and h > 0 and h < w:
+                logger.info(f"⏩ Bỏ qua video ngang ({w}x{h}): {title[:40]}...")
+                continue
+                
+            # 5. Lọc thời lượng chuẩn tiểu phẩm/hài kịch (từ 10 giây đến 90 giây)
+            if dur > 0 and (dur < 10 or dur > 90):
+                logger.info(f"⏩ Bỏ qua video thời lượng không phù hợp ({dur:.1f}s): {title[:40]}...")
+                continue
+                
+            play_addr = video_info.get("play_addr", {})
+            url_list = play_addr.get("url_list", [])
+            if not url_list:
+                download_addr = video_info.get("download_addr", {})
+                url_list = download_addr.get("url_list", [])
+                
+            if url_list:
+                candidates.append({
+                    "id": v_id,
+                    "title": title,
+                    "url": url_list[0],
+                    "is_direct_cdn": True,
+                    "duration": dur if dur > 0 else 30
+                })
+                if len(candidates) >= limit:
+                    break
+                    
     if candidates:
         logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin ĐỒNG NHẤT CHỦ ĐỀ HÀI HƯỚC!")
     else:
@@ -766,16 +765,22 @@ async def auto_scout_loop():
     
     # Thực hiện 1 lượt quét ngay khi khởi động
     try:
-        await asyncio.to_thread(execute_auto_scout_job)
+        last_success = await asyncio.to_thread(execute_auto_scout_job)
     except Exception as e:
         logger.error(f"🔴 Lỗi trong lượt quét khởi động: {e}")
+        last_success = False
         
     while True:
         try:
-            sleep_seconds = int(AUTO_SCOUT_INTERVAL_HOURS * 3600)
-            logger.info(f"⏰ Chờ {AUTO_SCOUT_INTERVAL_HOURS} giờ cho lượt quét tự động tiếp theo...")
+            if last_success:
+                sleep_seconds = int(AUTO_SCOUT_INTERVAL_HOURS * 3600)
+                logger.info(f"⏰ Đã xử lý xong video. Chờ {AUTO_SCOUT_INTERVAL_HOURS} giờ cho lượt quét tiếp theo (hoặc gõ /scout trên Telegram)...")
+            else:
+                sleep_seconds = 600  # 10 phút sau quét lại nếu lượt này chưa có video mới
+                logger.info(f"⏰ Chưa tìm thấy video mới đạt chuẩn. Sẽ tự động quét lại sau 10 phút (hoặc gõ /scout trên Telegram)...")
+                
             await asyncio.sleep(sleep_seconds)
-            await asyncio.to_thread(execute_auto_scout_job)
+            last_success = await asyncio.to_thread(execute_auto_scout_job)
         except Exception as e:
             logger.error(f"🔴 Lỗi trong vòng lặp auto_scout: {e}")
             await asyncio.sleep(60)
