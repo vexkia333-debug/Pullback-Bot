@@ -451,14 +451,15 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     if not RAPIDAPI_KEY:
         return []
         
+    # Danh sách từ khóa chuyên sâu cho clip hài kịch Douyin, troll chơi khăm & tiểu phẩm triệu view
     keywords = [
-        "搞笑",                  # Douyin Hài hước triệu view
-        "沙雕搞笑",              # Douyin Siêu bựa, lầy lội
-        "爆笑",                  # Douyin Cười bể bụng
+        "tiểu phẩm hài douyin", # Tiểu phẩm hài kịch Douyin
+        "douyin funny clips",   # Douyin hài hước
         "funny prank fail",     # Troll chơi khăm & tai nạn hài hước
         "funny animals comedy", # Động vật tấu hài
-        "tiểu phẩm hài douyin", # Tiểu phẩm hài kịch Douyin
-        "try not to laugh"      # Thử thách nhịn cười
+        "troll hài hước",       # Troll hài hước Việt & Douyin
+        "try not to laugh",     # Thử thách nhịn cười
+        "搞笑视频"              # Video hài hước Douyin
     ]
     chosen_kw = random.choice(keywords)
     logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{chosen_kw}'...")
@@ -472,11 +473,10 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     processed_ids = set(db.get("videos", []))
     candidates = []
     
-    # 1. Endpoint chính: /v1/search/post (tìm kiếm video theo từ khóa hài hước toàn cầu)
     url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
     params_post = {
         "keyword": chosen_kw,
-        "count": 12,
+        "count": 15,
         "sort_type": "1"  # 1: Most liked (triệu view / viral nhất)
     }
     
@@ -494,30 +494,36 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     except Exception as e:
         logger.error(f"🔴 Lỗi gọi RapidAPI /v1/search/post: {e}")
         
-    # 2. Endpoint dự phòng: /v1/feed/recommended (khám phá video xu hướng thịnh hành US/Global)
+    # Nếu từ khóa 1 không có, thử ngay từ khóa dự phòng chuẩn hài (KHÔNG dùng feed For You tổng hợp để tránh gái xinh/nhà cửa)
     if not aweme_list:
+        backup_kw = "funny prank fail" if chosen_kw != "funny prank fail" else "douyin funny clips"
         try:
-            url_rec = "https://tokapi-mobile-version.p.rapidapi.com/v1/feed/recommended"
-            r_rec = requests.get(url_rec, headers=headers, params={"pull_type": "0", "region": "US", "count": 10}, timeout=15)
-            if r_rec.status_code == 200 and r_rec.text.strip():
-                try:
-                    data_rec = json.loads(r_rec.text)
-                    aweme_list = data_rec.get("aweme_list", []) or data_rec.get("data", []) or data_rec.get("items", []) or []
-                except Exception as je:
-                    logger.warning(f"⚠️ Không thể parse JSON từ /v1/feed/recommended: {je}")
-            else:
-                logger.warning(f"⚠️ RapidAPI /v1/feed/recommended status: {r_rec.status_code} - {r_rec.text[:150]}")
+            logger.info(f"🔄 Đang quét từ khóa hài dự phòng: '{backup_kw}'...")
+            r_bk = requests.get(url_post, headers=headers, params={"keyword": backup_kw, "count": 15, "sort_type": "1"}, timeout=15)
+            if r_bk.status_code == 200 and r_bk.text.strip():
+                data_bk = json.loads(r_bk.text)
+                aweme_list = data_bk.get("aweme_list", []) or data_bk.get("data", []) or data_bk.get("items", []) or []
         except Exception as e:
-            logger.error(f"🔴 Lỗi gọi RapidAPI /v1/feed/recommended: {e}")
+            logger.error(f"🔴 Lỗi gọi từ khóa hài dự phòng: {e}")
             
-    # Danh sách từ khóa cấm (Loại bỏ triệt để video không phải hài: nấu ăn, triết lý, xe cộ, phim hoạt hình...)
+    # Danh sách từ khóa cấm triệt để: gái xinh/tiệm tóc, bất động sản/nhà đẹp, xe sang, nấu ăn, triết lý, máy bay...
     BLACKLIST_WORDS = [
         "soup", "recipe", "cook", "food", "kitchen", "bake",
-        "motivation", "destination", "inspiration", "mindset", "success",
-        "crypto", "bitcoin", "trading", "invest",
-        "lamborghini", "ferrari", "supercar", "carspotting", "aventador",
+        "motivation", "destination", "inspiration", "mindset", "success", "mysterious",
+        "crypto", "bitcoin", "trading", "invest", "forex",
+        "lamborghini", "ferrari", "supercar", "carspotting", "aventador", "maserati", "porsche",
         "peanuts", "snoopy", "charlie brown", "cartoon", "anime", "animation",
-        "reflexionesprofundas", "amorproprio", "verdadesincomodas"
+        "reflexionesprofundas", "amorproprio", "verdadesincomodas",
+        "haircut", "hairstyle", "salon", "makeup", "beauty", "cosmetic",
+        "real estate", "realtor", "house tour", "mansion", "architecture",
+        "airplane", "flight", "boarding", "aesthetic"
+    ]
+    
+    # Từ khóa nhận diện nội dung bắt buộc phải là hài hước
+    HUMOR_SIGNALS = [
+        "funny", "comedy", "lol", "joke", "prank", "laugh", "lmao", "fail",
+        "troll", "humor", "hài", "tiểu phẩm", "cười", "bựa", "douyin", "chúa hề",
+        "tấu hài", "bể bụng", "khó đỡ", "đi vào lòng đất", "lầy", "搞笑", "沙雕", "爆笑", "喜剧", "meme"
     ]
     
     # Phân tích danh sách video lấy được từ TokApi
@@ -533,18 +539,30 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
         title = item.get("desc") or "Video Hài Hước TikTok Douyin"
         lower_title = title.lower()
         
-        # 2. Bỏ qua nếu tiêu đề chứa từ khóa rác/không thuộc chủ đề hài
+        # 2. Bỏ qua nếu tiêu đề chứa từ khóa rác ngoài chủ đề hài
         if any(b in lower_title for b in BLACKLIST_WORDS):
             logger.info(f"⏩ Bỏ qua video ngoài chủ đề hài: {title[:45]}...")
+            continue
+            
+        # 3. Đảm bảo tính ĐỒNG NHẤT: Tiêu đề hoặc hashtag phải có dấu hiệu hài hước
+        has_humor = any(h in lower_title for h in HUMOR_SIGNALS)
+        if not has_humor:
+            logger.info(f"⏩ Bỏ qua video không có yếu tố hài hước: {title[:45]}...")
             continue
             
         video_info = item.get("video", {})
         w = video_info.get("width", 0)
         h = video_info.get("height", 0)
+        dur = video_info.get("duration", 0)
         
-        # 3. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height > Width)
+        # 4. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height > Width)
         if w > 0 and h > 0 and h <= w:
             logger.info(f"⏩ Bỏ qua video ngang/vuông ({w}x{h}): {title[:40]}...")
+            continue
+            
+        # 5. Lọc thời lượng chuẩn tiểu phẩm/hài kịch (từ 12 giây đến 70 giây) - loại bỏ clip 5s lướt qua
+        if dur > 0 and (dur < 12 or dur > 70):
+            logger.info(f"⏩ Bỏ qua video thời lượng không phù hợp ({dur}s): {title[:40]}...")
             continue
             
         play_addr = video_info.get("play_addr", {})
@@ -559,13 +577,13 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
                 "title": title,
                 "url": url_list[0],
                 "is_direct_cdn": True,
-                "duration": video_info.get("duration", 30)
+                "duration": dur if dur > 0 else 30
             })
             
     if candidates:
-        logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin chuẩn dọc & hài hước mới!")
+        logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin ĐỒNG NHẤT CHỦ ĐỀ HÀI HƯỚC!")
     else:
-        logger.info("ℹ️ [RapidAPI TokApi] Chưa tìm thấy video mới từ TokApi, chuyển qua kênh phụ...")
+        logger.info("ℹ️ [RapidAPI TokApi] Chưa tìm thấy video mới đạt chuẩn đồng nhất, chuyển qua kênh phụ...")
         
     return candidates
 
