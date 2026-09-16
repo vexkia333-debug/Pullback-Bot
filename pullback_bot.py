@@ -539,19 +539,23 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
         "viral comedy",
         "comedy skit",
         "try not to laugh",
-        "funny comedy",
         "funny video",
         "funny moments",
-        "hilarious comedy",
         "funny meme",
         "prank funny"
     ]
-    random.shuffle(search_queries)
-    
+    # Ưu tiên viral comedy lên đầu vì đây là từ khóa đem lại kết quả ổn định nhất
+    if random.random() > 0.4:
+        search_queries.remove("viral comedy")
+        search_queries.insert(0, "viral comedy")
+    else:
+        random.shuffle(search_queries)
+        
     url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
+    hit_rate_limit = False
     
     for kw in search_queries:
-        if len(candidates) >= limit:
+        if len(candidates) >= limit or hit_rate_limit:
             break
             
         logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{kw}'...")
@@ -567,12 +571,18 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
                     aweme_list = data.get("aweme_list", []) or data.get("data", []) or data.get("items", []) or []
                     if aweme_list:
                         break
+                elif r.status_code == 429:
+                    logger.warning(f"⚠️ TokApi HTTP 429: Chạm giới hạn lượt gọi của gói Basic (5 req/phút). Tạm dừng quét TokApi để tránh spam.")
+                    hit_rate_limit = True
+                    break
                 else:
                     logger.warning(f"⚠️ TokApi HTTP {r.status_code} ({kw}): {r.text[:80]}")
             except Exception as e:
                 logger.warning(f"⚠️ Lỗi gọi TokApi /v1/search/post (kw={kw}, sort={sort_t}): {e}")
                 
-        if not aweme_list:
+            time.sleep(1.2)  # Khoảng nghỉ an toàn giữa các request để bảo vệ gói Basic
+            
+        if hit_rate_limit or not aweme_list:
             continue
             
         for item in aweme_list:
