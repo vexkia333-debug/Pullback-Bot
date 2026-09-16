@@ -451,7 +451,15 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     if not RAPIDAPI_KEY:
         return []
         
-    keywords = ["funny comedy", "try not to laugh", "funny animals", "viral comedy", "funny clips", "douyin funny"]
+    keywords = [
+        "搞笑",                  # Douyin Hài hước triệu view
+        "沙雕搞笑",              # Douyin Siêu bựa, lầy lội
+        "爆笑",                  # Douyin Cười bể bụng
+        "funny prank fail",     # Troll chơi khăm & tai nạn hài hước
+        "funny animals comedy", # Động vật tấu hài
+        "tiểu phẩm hài douyin", # Tiểu phẩm hài kịch Douyin
+        "try not to laugh"      # Thử thách nhịn cười
+    ]
     chosen_kw = random.choice(keywords)
     logger.info(f"🔍 [RapidAPI TokApi] Đang quét video trực tiếp từ TikTok/Douyin: '{chosen_kw}'...")
     
@@ -468,7 +476,7 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
     url_post = "https://tokapi-mobile-version.p.rapidapi.com/v1/search/post"
     params_post = {
         "keyword": chosen_kw,
-        "count": 10,
+        "count": 12,
         "sort_type": "1"  # 1: Most liked (triệu view / viral nhất)
     }
     
@@ -502,21 +510,47 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
         except Exception as e:
             logger.error(f"🔴 Lỗi gọi RapidAPI /v1/feed/recommended: {e}")
             
+    # Danh sách từ khóa cấm (Loại bỏ triệt để video không phải hài: nấu ăn, triết lý, xe cộ, phim hoạt hình...)
+    BLACKLIST_WORDS = [
+        "soup", "recipe", "cook", "food", "kitchen", "bake",
+        "motivation", "destination", "inspiration", "mindset", "success",
+        "crypto", "bitcoin", "trading", "invest",
+        "lamborghini", "ferrari", "supercar", "carspotting", "aventador",
+        "peanuts", "snoopy", "charlie brown", "cartoon", "anime", "animation",
+        "reflexionesprofundas", "amorproprio", "verdadesincomodas"
+    ]
+    
     # Phân tích danh sách video lấy được từ TokApi
     for item in aweme_list:
         v_id = str(item.get("aweme_id") or item.get("id") or "")
         if not v_id or v_id in processed_ids:
             continue
             
-        # Bỏ qua các bài đăng dạng ảnh / slideshow (không phải video clip)
+        # 1. Bỏ qua các bài đăng dạng ảnh / slideshow (không phải video clip)
         if item.get("images") or item.get("image_post_info") or item.get("media_type") == 2:
             continue
             
         title = item.get("desc") or "Video Hài Hước TikTok Douyin"
-        play_addr = item.get("video", {}).get("play_addr", {})
+        lower_title = title.lower()
+        
+        # 2. Bỏ qua nếu tiêu đề chứa từ khóa rác/không thuộc chủ đề hài
+        if any(b in lower_title for b in BLACKLIST_WORDS):
+            logger.info(f"⏩ Bỏ qua video ngoài chủ đề hài: {title[:45]}...")
+            continue
+            
+        video_info = item.get("video", {})
+        w = video_info.get("width", 0)
+        h = video_info.get("height", 0)
+        
+        # 3. Bắt buộc tỷ lệ khung hình dọc chuẩn TikTok/Douyin (Height > Width)
+        if w > 0 and h > 0 and h <= w:
+            logger.info(f"⏩ Bỏ qua video ngang/vuông ({w}x{h}): {title[:40]}...")
+            continue
+            
+        play_addr = video_info.get("play_addr", {})
         url_list = play_addr.get("url_list", [])
         if not url_list:
-            download_addr = item.get("video", {}).get("download_addr", {})
+            download_addr = video_info.get("download_addr", {})
             url_list = download_addr.get("url_list", [])
             
         if url_list:
@@ -525,11 +559,11 @@ def scout_tiktok_douyin_via_rapidapi(limit=5):
                 "title": title,
                 "url": url_list[0],
                 "is_direct_cdn": True,
-                "duration": 30
+                "duration": video_info.get("duration", 30)
             })
             
     if candidates:
-        logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin mới không watermark!")
+        logger.info(f"✅ [RapidAPI TokApi] Tìm thấy {len(candidates)} video TikTok/Douyin chuẩn dọc & hài hước mới!")
     else:
         logger.info("ℹ️ [RapidAPI TokApi] Chưa tìm thấy video mới từ TokApi, chuyển qua kênh phụ...")
         
